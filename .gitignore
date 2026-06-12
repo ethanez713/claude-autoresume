@@ -1,0 +1,12 @@
+# Runtime state — never commit. Holds live session/pane ids + rate-limit state.
+state/
+*.log
+
+# Local, machine-specific config (copy from config.example.sh)
+config.sh
+
+# Defensive secret patterns (this project handles none, but keep the baseline)
+*secret*.json
+token.json
+.env*
+.secrets/
