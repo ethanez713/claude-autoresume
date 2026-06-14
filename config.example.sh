@@ -48,9 +48,21 @@ CCAR_LIMIT_PCT=95
 CCAR_DETECT_TAIL_LINES=15
 
 # --- resume action -----------------------------------------------------------
-# Keystrokes to un-pause. PREKEYS are sent first (e.g. to dismiss a menu), then TEXT, then Enter.
+# Keystrokes to un-pause. PREKEYS are sent first (e.g. to dismiss a menu), then
+# the input is CLEARED, then TEXT is typed, then Enter.
 # Confirm the exact sequence from the real pause screen.
 CCAR_RESUME_PREKEYS=""                 # e.g. "Escape"  — leave empty if no menu must be dismissed
+# Keys that empty the input box, sent right before the resume text. This prevents
+# residual content in a pane's prompt (a stray "/resume", or our own leading
+# characters dropped while the TUI was mid-render) from riding along and changing
+# the submitted line — we once saw a pane resume with "/resume the above workflow"
+# (run as a slash command, which failed) for exactly this reason. C-u kills the
+# line in Claude Code's prompt; set empty to disable clearing. Confirm at a real
+# limit that this binding empties the input on your build.
+CCAR_RESUME_CLEAR="C-u"
+# The resume text MUST be a plain prompt, never a slash command — a leading "/"
+# is interpreted by Claude as a command (e.g. "/resume"), not a message. Any
+# leading slashes are stripped defensively before sending.
 CCAR_RESUME_TEXT="continue the above workflow"
 CCAR_FOREGROUND_CMDS="node claude"     # pane_current_command must be one of these before we send keys
 

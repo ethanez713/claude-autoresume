@@ -207,13 +207,33 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
 }
 
 send_resume() { # $1 = paneref
-  local p="$1" pane; pane="$(pr_pane "$p")"
+  local p="$1" pane text; pane="$(pr_pane "$p")"
   if [ -n "${CCAR_RESUME_PREKEYS:-}" ]; then
     # shellcheck disable=SC2086 — prekeys are intentionally word-split key names
     txp "$p" send-keys -t "$pane" $CCAR_RESUME_PREKEYS
     sleep 1
   fi
-  txp "$p" send-keys -t "$pane" -l "$CCAR_RESUME_TEXT"
+  # Clear any residual content in the input box BEFORE typing. Without this, stale
+  # text already in a pane's prompt (e.g. a half-typed "/resume") — or the leading
+  # characters of our own send being dropped while the TUI is busy rendering — can
+  # ride along, so the submitted line is no longer exactly CCAR_RESUME_TEXT. We
+  # observed exactly this: with 4 panes resumed by the same send, one submitted
+  # "/resume the above workflow" (the "continue" prefix lost, a stale "/resume"
+  # left in place), which Claude then ran as a slash command and failed. Clearing
+  # first guarantees the submitted message is the resume prompt and never a slash
+  # command. The clear keys are configurable because which binding empties the
+  # input is TUI-specific (C-u kills the line in Claude Code's prompt).
+  if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
+    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
+    sleep 0.3
+  fi
+  # Belt-and-suspenders: a leading "/" makes Claude treat the line as a slash
+  # command, not a prompt. Strip any leading slashes so the resume text is always
+  # submitted as a plain message even if CCAR_RESUME_TEXT is misconfigured.
+  text="$CCAR_RESUME_TEXT"
+  while [ "${text#/}" != "$text" ]; do text="${text#/}"; done
+  txp "$p" send-keys -t "$pane" -l "$text"
   sleep 0.3 # let the TUI ingest the text before Enter so it isn't swallowed
   txp "$p" send-keys -t "$pane" Enter
 }

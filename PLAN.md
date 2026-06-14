@@ -160,8 +160,18 @@ teardown kills tmux+monitor and is out of scope for an in-tmux mechanism.
 `⏳ retry in Xm` (backoff), cleared on resume/cancel.
 
 After the wait, re-evaluate, then `send_resume` (optional `CCAR_RESUME_PREKEYS`,
-then literal `CCAR_RESUME_TEXT`, then Enter) to each still-limited pane; grace
-re-check escalates backoff if still limited.
+**clear the input** via `CCAR_RESUME_CLEAR`, then literal `CCAR_RESUME_TEXT`, then
+Enter) to each still-limited pane; grace re-check escalates backoff if still
+limited.
+
+**Why clear first (learned from a multi-pane resume).** The same `send_resume`
+went to four panes; three submitted `continue the above workflow`, but one
+submitted `/resume the above workflow` — Claude ran it as a slash command and it
+failed. The config text is slash-free, so the slash came from *that pane's input
+state*: residual content (a stale `/resume`) plus the leading chars of our send
+being dropped while the TUI was mid-render. `send_resume` now clears the input box
+before typing and strips any leading slash, so the submitted line is always the
+plain resume prompt regardless of what was sitting in the box.
 
 ## 6. Native compatibility
 
@@ -199,8 +209,9 @@ windows). The real pause message is
 
 - **Confirm the resume keystrokes at a real limit.** Detection and multi-session
   resume are solid and tested; what a real limit still needs to verify is that
-  `CCAR_RESUME_TEXT` ("continue the above workflow") actually un-pauses claude and
-  whether a menu requires `CCAR_RESUME_PREKEYS`. Capture ground truth when it trips:
+  `CCAR_RESUME_TEXT` ("continue the above workflow") actually un-pauses claude,
+  whether a menu requires `CCAR_RESUME_PREKEYS`, and that `CCAR_RESUME_CLEAR`
+  (`C-u`) empties the input on the current build. Capture ground truth when it trips:
   ```bash
   tmux -L ccar capture-pane -p -t cc -S -80 > state/limit_screen.txt
   cat ~/.claude/autoresume/state.json   # used_percentage should read ~100, resets_at sane
