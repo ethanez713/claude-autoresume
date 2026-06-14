@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# claude-autoresume launcher (PLAN.md §3b) — makes `claude` survive rate limits.
+# Inside tmux: registers the current pane and execs claude in place (no nesting).
+# Outside tmux: builds the private ccar server, opens a per-dir window, attaches.
+# Either way it ensures the account-wide monitor is up and binds the cancel key.
+# Non-interactive invocations (print mode, subcommands, --version, piped stdin)
+# pass straight through to the real claude.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- native passthrough ------------------------------------------------------
+# Only INTERACTIVE session launches get wrapped in tmux. Anything else must
+# behave EXACTLY like the native CLI, so we exec the real claude directly (no
+# tmux, no config or tmux dependency): headless print mode (-p/--print),
+# subcommands (mcp, doctor, update, ...), --version/--help, or a non-terminal
+# stdin (pipes/scripts). `exec claude` reaches the real binary: exec uses execvp
+# (PATH lookup) which ignores shell aliases — and this is a script anyway, so no
+# alias is loaded. (`exec command claude` would fail: exec can't exec a builtin.)
+is_passthrough() {
+  [ -t 0 ] || return 0                 # stdin not a tty -> headless/scripted
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -p|--print|-h|--help|-v|--version) return 0 ;;
+      --)        return 1 ;;           # end of options; rest is a prompt -> wrap
+      -*)        ;;                    # any other flag: keep scanning
+      agents|auth|auto-mode|doctor|install|mcp|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+                 return 0 ;;           # subcommand
+      *)         return 1 ;;           # first positional = a prompt -> wrap
+    esac
+  done
+  return 1                             # bare `claude` -> wrap
+}
+if is_passthrough "$@"; then
+  exec claude "$@"
+fi
+
+config="${CCAR_CONFIG:-$here/config.sh}"
+if [ ! -f "$config" ]; then
+  echo "Missing config: cp '$here/config.example.sh' '$here/config.sh' and review it." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$config"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux is required but not installed. Install it yourself (e.g. sudo apt install tmux) and re-run." >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
+chmod 700 "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
+
+# Pane registry: one file per Claude pane, read by the monitor. Tab-separated
+# fields <socket_path>\t<session>\t<pane_id>\t<dir>; atomic write, 0600. Keyed by
+# socket+pane (pane ids are only unique within a server).
+register_pane() {  # $1=socket_path $2=session $3=pane_id $4=dir
+  local key tmp
+  key="$(printf '%s:%s' "$1" "$3" | tr -c 'A-Za-z0-9._-' '_')"
+  tmp="$CCAR_PANES_DIR/.$key.$$"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$CCAR_PANES_DIR/$key"
+}
+
+# Start the account-wide monitor if not already running (shared by both paths).
+start_monitor() {
+  local pidfile="$CCAR_STATE_DIR/monitor.pid"
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    echo "Monitor already running (pid $(cat "$pidfile"))."
+  else
+    CCAR_CONFIG="$config" nohup "$here/bin/monitor.sh" >/dev/null 2>&1 &
+    echo $! >"$pidfile"
+    echo "Monitor started (pid $!). Log: $CCAR_LOG"
+  fi
+}
+
+# ---- In-tmux: run Claude in THIS pane — no nested server, no new window ------
+# Already inside tmux: the whole point is NOT to spin up a separate server and
+# attach (that nests). Register the current pane for the monitor, bind cancel on
+# this server, then exec claude in place. `exec` replaces cc-run (a child of your
+# interactive shell), so when claude exits your shell prompt returns and the pane
+# stays open. execvp ignores the `claude` alias and a script loads none anyway —
+# so `claude` here is the real binary on PATH, no wrapper recursion.
+if [ -n "${TMUX:-}" ]; then
+  socket_path="${TMUX%%,*}"
+  pane_id="${TMUX_PANE:-$(tmux display-message -p '#{pane_id}')}"
+  session="$(tmux display-message -p '#{session_name}')"
+
+  tmux set-option -w @ccar_dir "$PWD"          # tag current window with its dir
+  register_pane "$socket_path" "$session" "$pane_id" "$PWD"
+
+  # Cancel: prefix + $CCAR_CANCEL_KEY on YOUR server, plus the cc-cancel CLI.
+  tmux bind-key "$CCAR_CANCEL_KEY" run-shell "$here/bin/cc-cancel"
+  start_monitor
+  echo "claude-autoresume: watching this pane ($pane_id). Cancel: prefix+$CCAR_CANCEL_KEY or cc-cancel." >&2
+
+  reconnect=0
+  for arg in "$@"; do case "$arg" in -c|--continue|-r|--resume) reconnect=1 ;; esac; done
+  if [ "$reconnect" -eq 1 ]; then
+    exec claude "$@"                            # --continue/--resume: native semantics
+  else
+    exec claude --session-id "$(uuidgen)" "$@"  # fresh conversation, like native
+  fi
+fi
+
+# ---- Out of tmux: fall back to the private ccar server (build + attach) ------
+# All tmux commands go to the private CCAR socket so the wrapped session's
+# rendering config and cancel keybinding stay isolated from your normal tmux. The
+# conf (sourced via -f when the server first starts) fixes the terminal caps that
+# garble Claude's TUI.
+tx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
+
+# Reconnect flags. Only --continue reconnects to THIS dir's live window; bare
+# --resume always opens a fresh window with claude's session picker. Neither may
+# pin a --session-id (claude forbids combining it with continue/resume).
+continue_flag=0 reconnect=0
+for arg in "$@"; do
+  case "$arg" in
+    -c|--continue) continue_flag=1; reconnect=1 ;;
+    -r|--resume)   reconnect=1 ;;
+  esac
+done
+
+# Inner claude command. Plain launches pin a fresh --session-id (new conversation
+# every time, like native); reconnects let claude pick. We `exec` so the window
+# auto-closes when claude exits (no stale windows piling up). exec bypasses the
+# `claude` alias via execvp(), so there's no recursion and no `command` needed.
+if [ "$reconnect" -eq 1 ]; then
+  cmd="exec claude"
+else
+  session_id="$(uuidgen)"
+  cmd="exec claude --session-id $session_id"
+fi
+for arg in "$@"; do
+  cmd+=" $(printf '%q' "$arg")"
+done
+
+win_name="$(basename "$PWD")"; [ -n "$win_name" ] || win_name="/"
+
+# Most-recent live window whose @ccar_dir matches $PWD (tab-separated so paths with
+# spaces parse cleanly). The window option is how we map a directory to its window.
+dir_window() {
+  local fmt line wid wdir last=""
+  fmt="$(printf '#{window_id}\t#{@ccar_dir}')"
+  while IFS= read -r line; do
+    wid=${line%%$'\t'*}; wdir=${line#*$'\t'}
+    [ "$wdir" = "$PWD" ] && last="$wid"
+  done < <(tx list-windows -t "$CCAR_TMUX_SESSION" -F "$fmt" 2>/dev/null)
+  printf '%s' "$last"
+}
+
+run_in_window() {  # $1 = window id: tag it with this dir and launch claude in it
+  tx set-option -w -t "$1" @ccar_dir "$PWD"
+  local wpane sock
+  wpane="$(tx display-message -p -t "$1" '#{pane_id}')"
+  sock="$(tx display-message -p '#{socket_path}')"
+  tx send-keys -t "$wpane" -l "$cmd"
+  tx send-keys -t "$wpane" Enter
+  register_pane "$sock" "$CCAR_TMUX_SESSION" "$wpane" "$PWD"  # monitor watches it too
+}
+
+# Ensure the single account-wide session exists (its first window becomes ours).
+created=0
+if ! tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
+  tmux -L "$CCAR_TMUX_SOCKET" -f "$CCAR_TMUX_CONF" \
+    new-session -d -s "$CCAR_TMUX_SESSION" -c "$PWD" -n "$win_name"
+  created=1
+fi
+
+if [ "$continue_flag" -eq 1 ] && [ "$created" -eq 0 ] && [ -n "$(dir_window)" ]; then
+  # --continue with a live window for this dir: reconnect to it in place.
+  win="$(dir_window)"
+  tx select-window -t "$win"
+  echo "Reconnecting to the live wrapped session for $PWD (window $win)."
+else
+  # New window for this dir (or reuse the session's first window if we just made it).
+  if [ "$created" -eq 1 ]; then
+    win="$(tx display-message -p -t "$CCAR_TMUX_SESSION" '#{window_id}')"
+  else
+    win="$(tx new-window -P -F '#{window_id}' -t "$CCAR_TMUX_SESSION" -c "$PWD" -n "$win_name")"
+  fi
+  run_in_window "$win"
+  tx select-window -t "$win"
+  if [ "$reconnect" -eq 1 ]; then
+    echo "Opened a window for $PWD resuming a previous conversation (window $win)."
+  else
+    echo "Opened a window for $PWD (session-id $session_id, window $win)."
+  fi
+fi
+
+# Cancel chord: your tmux prefix, then $CCAR_CANCEL_KEY. Prefix table, so it
+# never collides with claude's own input.
+tx bind-key "$CCAR_CANCEL_KEY" run-shell "$here/bin/cc-cancel"
+
+start_monitor
+
+# Attach. We only get here when launched OUTSIDE tmux (the in-tmux branch above
+# execs and never returns), so this is always a plain, non-nested attach. Override
+# the outer TERM (see CCAR_OUTER_TERM) so tmux renders to the real terminal's
+# capabilities, not the `screen` terminfo your bashrc forces.
+attach_env=()
+[ -n "${CCAR_OUTER_TERM:-}" ] && attach_env+=(TERM="$CCAR_OUTER_TERM")
+exec env "${attach_env[@]}" tmux -L "$CCAR_TMUX_SOCKET" attach -t "$CCAR_TMUX_SESSION"

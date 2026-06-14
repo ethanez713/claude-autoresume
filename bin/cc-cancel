@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# claude-autoresume cancel (PLAN.md §3d) — drop the one-shot sentinel that tells
+# the monitor to stop retrying. Bound to prefix+$CCAR_CANCEL_KEY by cc-run.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "${CCAR_CONFIG:-$here/config.sh}"
+
+touch "$CCAR_STATE_DIR/cancel"

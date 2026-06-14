@@ -1,224 +1,218 @@
-# claude-autoresume — implementation plan
+# claude-autoresume — design & status
 
-> **For the implementing Claude instance:** this file is the spec. Read it top to
-> bottom, then work the TODO checklist in §9. The human operator will **manually
-> trigger a real 5-hour rate limit** so you can observe the live pause screen —
-> §6 is the empirical capture step that finalizes the two version-dependent
-> values (detection regex + resume keystrokes). Everything is **100% local**: the
-> only process that touches the network is `claude` itself talking to Anthropic.
-> The monitor and the status-line patch make **zero network calls** — keep it that way.
+> Status: **built and working.** Used daily as a transparent `claude` alias. One
+> item still needs a real limit to finalize (§9). This file is the as-built
+> reference; the original step-by-step build spec has been folded into the
+> summaries below now that the work is done.
+
+Everything is **100% local**: the only process that touches the network is
+`claude` talking to Anthropic. The monitor and the status-line patch make **zero**
+network calls — keep it that way.
 
 ---
 
-## 1. Goal / behavior spec
+## 1. Goal
 
-A long, walk-away interactive Claude Code session must survive a 5-hour rate
-limit with no human present:
+Be a drop-in `claude` that survives the account rate limit with nobody watching:
+when a limit pauses your session(s), wait until the window resets and resume the
+interrupted workflow in place — same conversation, same context, no relaunch.
+Work across **multiple projects at once**, and behave **exactly like native
+`claude`** for everything that isn't an interactive session launch.
 
-1. When *any* prompt/turn hits the limit, the TUI **pauses in place** (it does
-   **not** exit — confirmed by the operator). Detect that pause automatically;
-   the operator does not know in advance which prompt will trip it.
-2. Show a visible **"auto-resuming at HH:MM"** countdown (in the tmux status bar)
-   when a concrete reset time is known; otherwise a **"retrying in Xm"** countdown
-   on a **2 → 4 → 8 → 16 → 30-minute backoff, capped at 30m**.
-3. When the window resets, **resume the interrupted workflow in place** by sending
-   the literal text `continue the above workflow` + Enter into the paused session
-   (same conversation, same context — no relaunch, no `--resume`).
-4. Provide a **stop-retrying** key chord (default **Ctrl-b then X**).
+## 2. Architecture (as built)
 
-## 2. Architecture & the key insight
-
-Two facts make this clean:
-
-- **The TUI pauses in place, it does not exit.** A normal wrapper has nothing to
-  react to. **tmux is the handle**: run `claude` inside a tmux pane, read it with
-  `tmux capture-pane`, drive it with `tmux send-keys`. This is the technique every
-  working project (claude-auto-retry, autoclaude, amux) uses.
-- **The reset time is already a structured signal.** `~/.claude/statusline.py`
-  receives, on stdin from Claude Code, `rate_limits.five_hour.resets_at` — a Unix
-  timestamp (see that file, lines ~70-75). We **piggyback on the status line**:
-  patch it to also dump `rate_limits` to a state file every render. The monitor
-  reads `resets_at` from there. This avoids the brittle "parse 'resets 3pm' from
-  TUI text with TZ/DST math" that the other projects wrestle with.
+`claude` is aliased to `bin/cc-run`. **Inside tmux** it execs Claude in the current
+pane (no new server, no nesting); **outside tmux** it falls back to building the
+private `ccar` server and attaching. Both record the pane in a registry; a single
+background monitor watches every registered pane and drives resumes.
 
 ```
-┌─ tmux session "cc" ───────────────────────────────┐
-│  pane 0: claude (native TUI, runs normally)        │
-│            │ capture-pane (read)  ▲ send-keys (write)
-│            ▼                      │                │
-│  monitor.sh  ── reads ──►  state.json (resets_at)  │
-└────────────────────────────────┬──────────────────┘
-        ▲ writes every render     │
-   ~/.claude/statusline.py (patched, additive, fail-soft)
+  your tmux server(s)            ccar fallback server (only if launched w/o tmux)
+┌─ session: work ───────────┐  ┌─ socket "ccar", session "cc" ──────────┐
+│ pane → claude  @ccar_dir  │  │ window /proj  pane → claude  @ccar_dir  │
+└─────────────┬─────────────┘  └─────────────┬──────────────────────────┘
+              │ register (socket+pane+dir)    │ register
+              ▼                               ▼
+       ~/.claude/autoresume/panes/  ◄──reads── bin/monitor.sh
+         (one file per pane)                    │ capture-pane (read)
+                                                ▲ send-keys (resume)
+   bin/monitor.sh also reads ──► ~/.claude/autoresume/state.json
+        ▲ writes every render    {resets_at, used_percentage, captured_at}
+   ~/.claude/statusline.py (patched: additive, fail-soft)
 ```
 
-**Detection vs. timing are separated on purpose:**
-- *Detect the pause* from the pane text (authoritative for "paused right now").
-- *Decide how long to wait* from `state.json:resets_at` (authoritative for "when").
-- Fall back to pane-text time parsing, then to backoff, only if `resets_at` is missing.
+Three design decisions carry the whole thing:
 
-## 3. Components to build
+- **Run where you are; private socket only as a fallback.** Inside tmux, Claude
+  runs in your own pane (the natural place, no nesting). The isolated `ccar`
+  server is built only when you launch from a plain shell with no tmux to host it.
+  A per-pane **registry** decouples the monitor from any one server, so it follows
+  your Claude panes wherever they live.
+- **`used_percentage` is the authoritative limit signal, not pane text.** The
+  patched status line writes the five-hour `used_percentage` + `resets_at` to
+  `state.json`. The monitor gates detection on that number (account-global, can't
+  be faked by on-screen text), and uses `resets_at` for *when* to resume. Pane
+  text is only a fallback when `state.json` has no usage data.
+- **One monitor resumes every pane.** The limit is account-wide, so when it trips
+  the monitor resumes **every** registered claude pane — not just one. Panes are
+  keyed to their dir by a `@ccar_dir` tmux window option (also used by the
+  fallback's window-per-dir reconnect).
 
-### 3a. Status-line patch (one-time, additive, fail-soft)
-Modify the global `~/.claude/statusline.py` so that, in addition to printing the
-status line, it writes the rate-limit block to the state file. Requirements:
-- **Additive & fail-soft:** wrap in `try/except: pass`. statusline.py runs on
-  every render — if our code ever raised, it would blank the user's status bar.
-  It must never raise and never slow the status line down.
-- Write atomically (`tmp` file + `os.replace`) to `$CCAR_STATE_JSON`.
-- Dump at least: `{"resets_at": <int|null>, "used_percentage": <num|null>,
-  "captured_at": <now_epoch>}` from `data.get("rate_limits",{}).get("five_hour")`.
-- Create `$CCAR_STATE_DIR` with mode `0700` and the file `0600` if missing.
-- **Keep a backup** of the original statusline.py before editing (`statusline.py.bak`).
-- The state dir path must match `config.sh` (default `~/.claude/autoresume`).
+## 3. Components (as built)
 
-### 3b. Launcher (`bin/cc-run`)
-Starts a watched session:
-- Create tmux session `$CCAR_TMUX_SESSION` (detached if not present), one pane for claude.
-- Launch claude in that pane with a **pinned session id**: `claude --session-id "$(uuidgen)"`
-  (record the id to `$CCAR_STATE_DIR/session_id` for an optional fallback relaunch path).
-- Record the claude **pane id** (`tmux display-message -p '#{pane_id}'`) to
-  `$CCAR_STATE_DIR/pane` so the monitor targets it unambiguously.
-- Start `monitor.sh` in the background (or a second pane).
-- Register the cancel key-binding (§3d).
-- `attach` the operator to the session.
+- **`~/.claude/statusline.py` patch** (`dump_rate_limits`, fail-soft, backup at
+  `statusline.py.bak`). On every render writes `{resets_at, used_percentage,
+  captured_at}` from `rate_limits.five_hour` to `$CCAR_STATE_JSON`, atomically,
+  `0600` in a `0700` dir. Skips the write when `five_hour` is absent so a fresh
+  session can't clobber the last good values with nulls.
 
-### 3c. Monitor (`bin/monitor.sh`) — the core loop
-Polls every `$CCAR_POLL_SECONDS`:
+- **`bin/cc-run`** (launcher / alias target):
+  - **Native passthrough** — execs the real `claude` directly (no tmux) for
+    headless `-p/--print`, subcommands (`mcp`, `doctor`, `update`, `auth`, …),
+    `--version/--help`, or non-TTY stdin. `exec claude` bypasses the alias via
+    `execvp` (a script loads no alias anyway).
+  - **In-tmux (`$TMUX` set)** — the common path: derive `socket_path`/`pane_id`
+    from `$TMUX`/`$TMUX_PANE`, tag the window `@ccar_dir=$PWD`, register the pane,
+    bind the cancel chord on **this** server, ensure the monitor is up, then
+    `exec claude [--session-id <uuid>] [args]` in the current pane. `exec` only
+    replaces cc-run (a child of your shell), so the pane stays and your prompt
+    returns when claude exits. No new window, no attach, **no nesting**.
+  - **Out-of-tmux fallback** — ensures the private session `cc` exists, opens a
+    window per `$PWD` running `exec claude …`, registers that pane too, then
+    attaches overriding `TERM` to `$CCAR_OUTER_TERM`. `-c/--continue` reconnects
+    to this dir's live window if present; `-r/--resume` opens claude's picker.
+    (Reconnect flags don't pin `--session-id`, which claude forbids with them.)
+  - Both paths share `register_pane` (writes the registry file) and `start_monitor`
+    (pidfile-guarded).
+
+- **`bin/monitor.sh`** (single account-wide watcher) — see §4/§5.
+
+- **Pane registry** (`$CCAR_PANES_DIR`, default `~/.claude/autoresume/panes/`,
+  `0700`) — one `0600` file per Claude pane, tab-separated
+  `<socket_path>\t<session>\t<pane_id>\t<dir>`, written atomically by `cc-run`.
+  It's the contract between launcher and monitor: the monitor reads it (addressing
+  each pane's server by socket *path* with `tmux -S`), so it follows panes across
+  your own server and the `ccar` fallback. The monitor prunes a file when its pane
+  dies and exits once none remain (`CCAR_IDLE_EXIT_SECONDS` grace).
+
+- **`bin/cc-cancel`** — `touch`es `$CCAR_STATE_DIR/cancel`. Works two ways: run it
+  directly from any shell, or press the bound chord (**your prefix then `X`** —
+  backtick + X here), which `cc-run` binds on whichever server hosts the pane. The
+  monitor consumes the sentinel and exits; the next `claude` launch restarts it.
+
+- **`tmux.conf`** (loaded via `-f` only on the **fallback** `ccar` socket) —
+  sources the user's `~/.tmux.conf` (keeps their prefix/mouse/keys), then fixes the
+  terminal caps that garble Claude's TUI (`default-terminal tmux-256color`,
+  `terminal-features ",*:RGB"`), bumps history, and forwards Claude's title to the
+  terminal tab (`set-titles on` / `set-titles-string '#T'`). For the in-tmux path
+  the same caps must live in the user's own `~/.tmux.conf` (their server renders
+  Claude).
+
+- **`config.sh`** (from `config.example.sh`, gitignored) — all tunables.
+
+## 4. Detection (`detect_limited`)
+
+The account is limited per the authoritative status-line usage; on-screen text is
+secondary. When limited, **every** claude pane is returned for resuming.
 
 ```
-loop:
-  if cancel sentinel exists: clear status, log "cancelled", remove sentinel, idle until next launch
-  pane := read $CCAR_STATE_DIR/pane
-  screen := tmux capture-pane -p -t "$pane" -S -50
-  if screen matches $CCAR_DETECT_REGEX:        # paused at limit
-     target := compute_wait()                  # see §7
-     show_countdown_until(target)              # set tmux status-right; re-check cancel each tick
-     if cancelled during wait: continue loop
-     if not foreground_is_claude(pane): log + skip   # never inject into a shell
-     send_resume(pane)                         # PREKEYS, then -l TEXT, then Enter
-     sleep grace (~15s); re-capture:
-        still limited? -> escalate backoff and wait again
-        cleared?       -> clear status, log "resumed", reset backoff index
-  sleep $CCAR_POLL_SECONDS
+panes := all panes whose pane_current_command ∈ CCAR_FOREGROUND_CMDS (claude/node)
+used  := state.json.used_percentage
+if used is known:
+    limited  ⇔  used ≥ CCAR_LIMIT_PCT (default 95)   # authoritative; ignore text
+else:                                                # no usage data → fallback
+    limited  ⇔  any pane's last CCAR_DETECT_TAIL_LINES *non-blank* lines
+               match CCAR_DETECT_REGEX                # bottom-anchored
+if limited: resume ALL claude panes
 ```
 
-`foreground_is_claude`: `tmux display-message -p -t "$pane" '#{pane_current_command}'`
-must be in `$CCAR_FOREGROUND_CMDS` (claude is a node process → typically `node`).
+Why this shape (both learned from a live test):
+- **Usage gate kills false positives.** A session that merely *displays* the limit
+  phrase (e.g. a conversation about rate limits) used to send the monitor into a
+  bogus multi-hour wait. The `used < CCAR_LIMIT_PCT` veto stops that.
+- **Resume-all stops sessions being left behind.** Per-pane text matching missed
+  panes whose message had scrolled out of the viewport. Since the limit is
+  account-wide, once limited we resume every claude pane regardless of what's
+  visible.
+- The fallback is anchored to the last *non-blank* lines because `capture-pane`
+  pads to full pane height with blank rows (a naive `tail` grabs only blanks).
 
-`send_resume`: `[ -n PREKEYS ] && tmux send-keys -t "$pane" $PREKEYS` ; then
-`tmux send-keys -t "$pane" -l "$CCAR_RESUME_TEXT"` ; then `tmux send-keys -t "$pane" Enter`.
-(`-l` sends the text literally so it is never interpreted as key names.)
+## 5. Wait logic (`compute_wait`) + sleep/wake safety
 
-### 3d. Cancel mechanism (`bin/cc-cancel`)
-- `cc-cancel` simply `touch`es `$CCAR_STATE_DIR/cancel`.
-- Launcher binds it in tmux's **prefix table** (not root, to avoid clobbering
-  claude's own input): `tmux bind-key "$CCAR_CANCEL_KEY" run-shell '<abs path>/cc-cancel'`.
-- Operator presses **prefix then the key** (default **Ctrl-b X**) to stop retrying.
-- Monitor removes the sentinel after acting so it's one-shot.
+Priority:
+1. **`state.json:resets_at`** present:
+   - future → `target = resets_at + CCAR_RESET_MARGIN_SECONDS`;
+   - already passed, first try (`backoff_idx==0`) → **resume now** (slept through
+     the reset — window is open);
+   - passed and already retried → **backoff** (don't busy-resume a stale ts).
+2. Else parse a clock time off the pane (timezone-aware if the message carries
+   one, e.g. `(America/New_York)`) → next future epoch.
+3. Else **backoff**: `CCAR_BACKOFF_MINUTES` (2,4,8,16,30), hold at 30.
 
-## 4. One-time setup (document in README; implementer performs/verifies)
+**Sleep/wake.** Any target beyond `now + CCAR_MAX_WAIT_SECONDS` (6h, longer than a
+session window) is collapsed to an immediate resume, so a stale/rolled-over time
+can't strand a session ~24h. `wait_until` waits on the absolute epoch and re-reads
+the wall clock every ~10s, so a suspend that overshoots the target fires within
+~10s of wake (and logs the clock jump). Holds across a WSL freeze/thaw; a full WSL
+teardown kills tmux+monitor and is out of scope for an in-tmux mechanism.
 
-1. **Install tmux** if absent (`tmux >= 2.1`). Do **not** auto-install silently —
-   the operator runs the install; just check and instruct.
-2. `cp config.example.sh config.sh` and review values.
-3. `mkdir -p ~/.claude/autoresume && chmod 700 ~/.claude/autoresume`.
-4. Apply the status-line patch (§3a); confirm `statusline.py.bak` exists and the
-   status bar still renders normally.
-5. `chmod +x bin/*`.
-6. (Optional) add `bin/` to PATH or alias `cc-run`.
+**Countdown.** `status-right` shows `⏳ resume HH:MM (in Xm)` (reset path) or
+`⏳ retry in Xm` (backoff), cleared on resume/cancel.
 
-## 5. Config
+After the wait, re-evaluate, then `send_resume` (optional `CCAR_RESUME_PREKEYS`,
+then literal `CCAR_RESUME_TEXT`, then Enter) to each still-limited pane; grace
+re-check escalates backoff if still limited.
 
-All tunables live in `config.sh` (see `config.example.sh` for the annotated list).
-The two values that **must be finalized from the live limit** (§6) are
-`CCAR_DETECT_REGEX` and `CCAR_RESUME_PREKEYS`/`CCAR_RESUME_TEXT`.
+## 6. Native compatibility
 
-## 6. Empirical capture (operator triggers the real limit — do this live)
+The alias is transparent: non-interactive `claude` (print mode, subcommands,
+version/help, piped stdin) behaves exactly like the real CLI (§3 passthrough).
+Multiple concurrent projects each get their own window; `--continue`/`--resume`
+are honored per-dir. Plain `claude` always starts a fresh conversation, like
+native.
 
-The other projects disagree on the exact resume keystrokes (`continue` alone vs.
-`Escape→continue→Enter` vs. selecting a menu "option 1"), because it depends on
-what the TUI renders. When the operator hits the real limit, capture ground truth:
-
-```bash
-# with claude paused at the limit inside the cc session:
-tmux capture-pane -p -S -80 > state/limit_screen.txt   # exact pause text + any menu
-cat ~/.claude/autoresume/state.json                    # confirm resets_at is present & sane
-```
-
-From `limit_screen.txt` finalize:
-- **`CCAR_DETECT_REGEX`** — a stable substring of the pause screen.
-- **Resume sequence** — if a menu is shown, set `CCAR_RESUME_PREKEYS` to whatever
-  dismisses/selects it (e.g. `Escape` or `1`), then `continue the above workflow`.
-- Confirm `state.json.resets_at` matches the time shown on screen (sanity-check the
-  whole piggyback path end to end).
-
-## 7. Wait-time logic (`compute_wait`)
-
-Priority order:
-1. **`state.json:resets_at`** present and in the future → `target = resets_at + CCAR_RESET_MARGIN_SECONDS`. Reset backoff index. *(normal path)*
-2. Else parse an `HH:MM`/`H[:MM]am/pm` from the pane; resolve to the next future
-   epoch (bare times roll over midnight; full datetimes are used as-is).
-3. Else **backoff**: take the next value from `CCAR_BACKOFF_MINUTES` (2,4,8,16,30),
-   holding at 30; `target = now + step`.
-
-Countdown display: `tmux set -t "$CCAR_TMUX_SESSION" status-right` to
-`⏳ resume HH:MM (in Xm)` (path 1) or `⏳ retry in Xm` (path 3), refreshed each tick.
-Clear `status-right` on resume/cancel.
-
-## 8. Security / governance requirements (non-negotiable)
+## 7. Security / governance (non-negotiable)
 
 - **100% local.** Monitor + status-line patch make no network calls. Only `claude`
-  egresses, to Anthropic. No telemetry, no phone bridges, no third-party services.
-- **No third-party code or deps.** bash + tmux (system) + python **stdlib** only.
-  Do not `npm install` anything, do not adopt the existing projects' code — we are
-  reimplementing the technique, not importing their supply chain.
-- **send-keys safety:** always verify `pane_current_command` is claude/node before
-  sending; only ever send the configured resume sequence; target the recorded pane
-  id, never a guessed one. This prevents injecting `continue⏎` into a shell.
+  egresses, to Anthropic. No telemetry, no third-party services.
+- **No third-party code/deps.** bash + system tmux + python **stdlib** only.
+- **send-keys safety:** only ever send the configured resume sequence, only to
+  panes whose `pane_current_command` is claude/node — never inject into a shell.
 - **Fail-soft status-line patch:** wrapped in try/except; can never break or slow
   the global status bar; original backed up.
-- **File hygiene:** state dir `0700`, files `0600`; everything under `state/` and
-  `~/.claude/autoresume` is gitignored / outside the repo. Log no secrets (there
-  are none here, but don't dump full pane contents to the log either — log events,
-  not screens).
-- **No silent installs.** tmux presence is checked and reported; the operator installs.
+- **File hygiene:** state dir `0700`, files `0600`; everything runtime is
+  gitignored / outside the repo. Log events, not screen contents.
+- **No silent installs.** tmux presence is checked and reported; operator installs.
 
-## 9. TODO (work in order)
+## 8. Done
 
-- [ ] Read `~/.claude/statusline.py`; back it up to `statusline.py.bak`.
-- [ ] Implement the additive, fail-soft state-dump patch (§3a). Verify the status
-      bar still renders and `state.json` appears with `resets_at` once a session has run a bit.
-- [ ] `config.sh` from the example; create `~/.claude/autoresume` (0700).
-- [ ] `bin/cc-run` launcher (§3b): tmux session, pinned `--session-id`, record pane id, start monitor, bind cancel key, attach.
-- [ ] `bin/monitor.sh` core loop (§3c) with detection, `compute_wait` (§7), countdown, foreground check, send_resume, grace re-check, backoff escalation.
-- [ ] `bin/cc-cancel` + tmux prefix-table binding (§3d).
-- [ ] Dry-run validation **without** a real limit (§10).
-- [ ] **Live:** operator triggers the limit → §6 capture → finalize `CCAR_DETECT_REGEX`
-      + resume keystrokes in `config.sh` → confirm full auto-resume end to end.
-- [ ] README with the §4 setup steps and usage.
+Status-line patch · launcher with passthrough + window-per-dir + alias-safe `exec`
+· single account-wide monitor with usage-gated detection, resume-all, compute_wait
++ sleep/wake safety, countdown, backoff · cancel chord · private-socket rendering
+fixes + tab-title forwarding · README + `~/.bashrc` alias. All dry-run validated
+(detection FP-veto / usage-trigger / viewport-independent resume / bottom-anchored
+fallback / multi-pane resume-all / sleep-through / cancel / passthrough / per-dir
+windows). The real pause message is
+`You've hit your session limit · resets 4am (America/New_York)`.
 
-## 10. Testing / validation
+## 9. Open
 
-**Without a real limit (do first):**
-- **Fake pause:** print a line matching `CCAR_DETECT_REGEX` into the claude pane (or
-  point the monitor at a scratch pane echoing the limit text) and confirm: detection
-  fires, countdown renders in the status bar, `send_resume` targets the right pane,
-  and the foreground guard blocks sending when the pane is a bare shell.
-- **resets_at path:** hand-write a `state.json` with `resets_at = now+90s`; confirm
-  the monitor waits to that time + margin, not the backoff.
-- **Backoff path:** remove `resets_at`; confirm 2→4→8→16→30 escalation and 30m cap.
-- **Cancel:** trigger a wait, press prefix+X, confirm retry stops, status clears,
-  sentinel is consumed, session left paused.
-- **Foreground guard:** confirm no keys are sent when `pane_current_command` is `bash`.
+- **Confirm the resume keystrokes at a real limit.** Detection and multi-session
+  resume are solid and tested; what a real limit still needs to verify is that
+  `CCAR_RESUME_TEXT` ("continue the above workflow") actually un-pauses claude and
+  whether a menu requires `CCAR_RESUME_PREKEYS`. Capture ground truth when it trips:
+  ```bash
+  tmux -L ccar capture-pane -p -t cc -S -80 > state/limit_screen.txt
+  cat ~/.claude/autoresume/state.json   # used_percentage should read ~100, resets_at sane
+  ```
+- **Optional hardening:** `cc-run`'s monitor-already-running check trusts the
+  pidfile via `kill -0`; a recycled PID could mask a dead monitor. Low value on a
+  personal box — pending a decision.
 
-**With the real limit (operator-triggered):** §6 capture, then confirm the session
-actually resumes the interrupted workflow on its own when the window resets.
+## 10. Operations
 
-## 11. Open questions to resolve at the live limit
-
-- Does the pause render a **menu** (needing PREKEYS) or a bare paused turn?
-- Does Claude Code keep invoking the status line **while paused** (so `resets_at`
-  stays fresh)? Even if it stops, the last-written `resets_at` is a fixed future
-  timestamp and remains correct — note which behavior you observe.
-- Exact `pane_current_command` value for the claude pane (confirm it's `node`).
+- **Restart the monitor after editing `monitor.sh`** — a running bash loop doesn't
+  re-read its file. Kill the pid in `~/.claude/autoresume/monitor.pid` and relaunch
+  (or end the session and `claude` again).
+- Inspect: `tmux -L ccar ls`, `tail -f ~/.claude/autoresume/monitor.log`.
+- End everything: `tmux -L ccar kill-session -t cc`.
