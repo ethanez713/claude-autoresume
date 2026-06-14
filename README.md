@@ -32,10 +32,19 @@ confirming `CCAR_RESUME_TEXT` un-pauses claude and whether a menu needs
 
 ## One-time setup
 
-In short: install `tmux` (≥2.1), `cp config.example.sh config.sh`,
-`mkdir -p ~/.claude/autoresume && chmod 700 ~/.claude/autoresume`, apply the
-fail-soft status-line patch (keeps a `.bak`), `chmod +x bin/*`, and alias `claude`
-to `bin/cc-run` (see Usage).
+```bash
+./install.sh
+```
+
+The installer is idempotent and 100% local (it installs nothing from the network
+and never auto-installs system packages). It: checks for `tmux`/`python3` and
+reports if missing; `chmod +x bin/*`; copies `config.example.sh` → `config.sh` if
+absent (never clobbers); creates `~/.claude/autoresume{,/panes}` at `0700`; applies
+the fail-soft status-line patch to `~/.claude/statusline.py` (keeps a `.bak`, skips
+if already applied, falls back to printing manual steps if it can't find the parse
+anchor); and adds the `claude` alias to `~/.bashrc` (skipped if already present, or
+with `CCAR_NO_ALIAS=1`). Override `CLAUDE_DIR`/`BASHRC` to install elsewhere. Then
+open a new shell (or `source ~/.bashrc`).
 
 ## Usage
 
