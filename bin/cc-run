@@ -154,6 +154,14 @@ dir_window() {
 
 run_in_window() {  # $1 = window id: tag it with this dir and launch claude in it
   tx set-option -w -t "$1" @ccar_dir "$PWD"
+  # Creating the window with `-n "$win_name"` freezes tmux's automatic-rename for
+  # it, which would pin the tab name and hide Claude's live status (the emoji it
+  # publishes via the pane title). Restore the user's global automatic-rename
+  # preference so a custom automatic-rename-format keeps tracking the running
+  # Claude. If they keep it off globally, the static -n name is what they want.
+  if [ "$(tx show-options -gv automatic-rename 2>/dev/null)" = "on" ]; then
+    tx set-option -w -t "$1" automatic-rename on
+  fi
   local wpane sock
   wpane="$(tx display-message -p -t "$1" '#{pane_id}')"
   sock="$(tx display-message -p '#{socket_path}')"
