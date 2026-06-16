@@ -63,7 +63,7 @@ CCAR_RESUME_CLEAR="C-u"
 # The resume text MUST be a plain prompt, never a slash command — a leading "/"
 # is interpreted by Claude as a command (e.g. "/resume"), not a message. Any
 # leading slashes are stripped defensively before sending.
-CCAR_RESUME_TEXT="continue the above workflow"
+CCAR_RESUME_TEXT="continue"
 CCAR_FOREGROUND_CMDS="node claude"     # pane_current_command must be one of these before we send keys
 
 # --- wait logic --------------------------------------------------------------

@@ -297,6 +297,17 @@ detect_limited() { # echoes panerefs to resume, or nothing
 
 count() { [ -z "$1" ] && echo 0 || grep -c . <<<"$1"; }
 
+# Panerefs present in BOTH newline-separated lists. Resume targets are the
+# intersection of (panes limited AT DETECTION) and (panes still limited/alive NOW),
+# so a pane OPENED during the wait — never rate-limited, maybe mid-task — is never
+# resumed (it's in the second list but not the first), and a pane CLOSED during the
+# wait is silently dropped (in the first but not the second). Pane ids are stable
+# and never reused within a tmux server, so this matches by identity, not position.
+intersect_panes() { # $1, $2 = newline-separated paneref lists
+  comm -12 <(printf '%s' "$1" | grep -v '^$' | sort -u) \
+           <(printf '%s' "$2" | grep -v '^$' | sort -u)
+}
+
 # When sourced (tests), expose the functions but don't enter the loop.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
@@ -336,24 +347,46 @@ while :; do
       log "cancelled during wait — monitor exiting (cc-run restarts it)"
       exit 0
     fi
-    # Re-evaluate after the wait (windows/usage may have changed).
+    # Re-evaluate after the wait (windows/usage may have changed). Only resume the
+    # panes that were limited at detection AND are still live and limited now — NOT
+    # whatever claude panes happen to exist now. Panes opened during the wait were
+    # never rate-limited; injecting "continue" into them is the wrong-window /
+    # needless-work bug. A pane opened-and-paused during the wait is harmless: it's
+    # caught as a fresh detection on the next loop pass.
     still="$(detect_limited)"
-    if [ -z "$still" ]; then
+    resume="$(intersect_panes "$limited" "$still")"
+    # Belt-and-suspenders: of the still-limited captured panes, resume ONLY those
+    # whose OWN bottom screen still shows the limit message. A genuinely-paused pane
+    # keeps displaying that message until something is sent to it (a window reset
+    # doesn't redraw it), so this never strands one; but a pane the user resumed by
+    # hand mid-wait (now mid-task or at a clean prompt) no longer shows it and is
+    # skipped — so we never inject "continue" into active work.
+    confirmed=""
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      if is_paused_pane "$p"; then
+        confirmed+="$p"$'\n'
+      else
+        log "skipping a captured pane that no longer shows the limit message (resumed by hand?)"
+      fi
+    done <<<"$resume"
+    confirmed="${confirmed%$'\n'}"
+    if [ -z "$confirmed" ]; then
       backoff_idx=0
       status_clear
-      log "limit cleared during wait — no resume needed"
+      log "no captured pane still shows the limit after the wait — no resume needed"
     else
-      while IFS= read -r p; do [ -n "$p" ] && send_resume "$p"; done <<<"$still"
-      log "resume sent to $(count "$still") pane(s)"
+      while IFS= read -r p; do [ -n "$p" ] && send_resume "$p"; done <<<"$confirmed"
+      log "resume sent to $(count "$confirmed") pane(s)"
       sleep "${CCAR_GRACE_SECONDS:-15}"
-      after="$(detect_limited)"
+      after="$(intersect_panes "$limited" "$(detect_limited)")"
       if [ -n "$after" ]; then
         backoff_idx=$((backoff_idx + 1))
         log "still limited after resume ($(count "$after") pane(s)) — escalating backoff (idx $backoff_idx)"
       else
         backoff_idx=0
         status_clear
-        log "resumed $(count "$still") pane(s)"
+        log "resumed $(count "$confirmed") pane(s)"
       fi
     fi
   fi
