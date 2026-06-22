@@ -153,8 +153,24 @@ Priority:
 session window) is collapsed to an immediate resume, so a stale/rolled-over time
 can't strand a session ~24h. `wait_until` waits on the absolute epoch and re-reads
 the wall clock every ~10s, so a suspend that overshoots the target fires within
-~10s of wake (and logs the clock jump). Holds across a WSL freeze/thaw; a full WSL
-teardown kills tmux+monitor and is out of scope for an in-tmux mechanism.
+~10s of wake (and logs the clock jump). A full WSL teardown kills tmux+monitor and
+is out of scope for an in-tmux mechanism.
+
+**Clock reconciliation.** Re-reading the wall clock only helps if the clock is
+*right*: on WSL2 the guest clock can freeze in the past across a host sleep and
+re-sync lazily, so `date +%s` reads BEHIND true wall time after a resume —
+inflating every `target - now` and painting a wrong countdown. The monitor
+therefore reconciles its notion of "now" against an external true-time source
+(`CCAR_HOST_TIME_CMD`, the Windows host clock by default — local, no network) and
+carries the difference as `clock_offset`, added to every `date +%s` via
+`now_epoch`. It does **not** touch the system clock (that needs root); correcting
+only "now" suffices because `resets_at` is an absolute server epoch. Cadence is
+rate-limited per-interaction: every poll/wait pass calls `reconcile_clock`, but it
+only re-queries the host once per `CCAR_CLOCK_RESYNC_SECONDS` (10m) of RAW elapsed
+time — except a detected suspend jump in `wait_until` forces an immediate
+re-query, since that is exactly when the guest clock has likely jumped. Set
+`CCAR_HOST_TIME_CMD=""` to disable (offset stays 0 ≡ plain `date`), e.g. on native
+Linux where `systemd-timesyncd` already keeps the clock honest.
 
 **Countdown.** `status-right` shows `⏳ resume HH:MM (in Xm)` (reset path) or
 `⏳ retry in Xm` (backoff), cleared on resume/cancel.

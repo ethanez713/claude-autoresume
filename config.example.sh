@@ -81,6 +81,27 @@ CCAR_IDLE_EXIT_SECONDS=60
 # clock every ~10s while waiting, so a suspend/resume past the reset still fires.
 CCAR_MAX_WAIT_SECONDS=21600            # 6 hours
 
+# --- clock reconciliation ----------------------------------------------------
+# On WSL2 / some VMs the guest clock can freeze in the past when the host sleeps
+# and only re-syncs lazily, so `date +%s` reads BEHIND true wall time after a
+# resume — which makes the monitor over-wait (it thinks the reset is further off
+# than it is) and paint a wrong countdown. The monitor reconciles its notion of
+# "now" against an external true-time source and carries the difference as an
+# offset; it does NOT change the system clock (no root needed). resets_at is an
+# absolute server epoch, so correcting only "now" is sufficient.
+#
+# Command that prints the true wall-clock UNIX epoch. Default reads the Windows
+# host clock (WSL) — 100% local, no network. Set to "" to DISABLE reconciliation
+# (offset stays 0, identical to plain `date`), e.g. on native Linux where
+# systemd-timesyncd already keeps the clock honest.
+CCAR_HOST_TIME_CMD='powershell.exe -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"'
+# Reconcile at most once per this many seconds (rate-limited "per interaction"):
+# the monitor checks on every poll/wait pass but only re-queries the host when
+# this much RAW clock time has elapsed since the last check — except a detected
+# suspend jump forces an immediate re-query regardless.
+CCAR_CLOCK_RESYNC_SECONDS=600          # 10 minutes
+CCAR_CLOCK_DRIFT_WARN_SECONDS=5        # log a correction only when it shifts more than this
+
 # --- cancel ------------------------------------------------------------------
 # tmux prefix-table key that stops retrying (press: YOUR prefix, then this key,
 # e.g. backtick then X if your tmux prefix is backtick).

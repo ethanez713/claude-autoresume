@@ -16,7 +16,62 @@ source "${CCAR_CONFIG:-$here/config.sh}"
 CANCEL_FILE="$CCAR_STATE_DIR/cancel"
 backoff_idx=0
 
+# --- clock reconciliation ----------------------------------------------------
+# On WSL2 (and some VMs) the guest clock can freeze in the past when the host
+# sleeps and only re-syncs lazily, so `date +%s` reads BEHIND true wall time
+# after a resume. Every timing decision here is epoch math against an absolute
+# resets_at, so a lagging "now" makes us over-wait and paint a wrong countdown.
+# We reconcile against an external true-time source (the Windows host clock by
+# default) and carry the difference as clock_offset, added to every `date +%s`
+# via now_epoch. We do NOT touch the system clock (that needs root); we only fix
+# the monitor's own notion of "now", which is sufficient because resets_at is an
+# absolute server epoch, not derived from the local clock.
+clock_offset=0          # seconds to add to `date +%s` to get true wall time
+clock_last_resync=0     # raw `date +%s` at the last reconcile attempt (gates cadence)
+# Command that prints the true wall-clock UNIX epoch. Default reads the Windows
+# host clock (WSL); 100% local, no network. Set CCAR_HOST_TIME_CMD="" to disable
+# reconciliation (offset stays 0 -> identical to plain `date`), e.g. on native
+# Linux where systemd-timesyncd already keeps the clock honest.
+CCAR_HOST_TIME_CMD="${CCAR_HOST_TIME_CMD-powershell.exe -NoProfile -Command '[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()'}"
+CCAR_CLOCK_RESYNC_SECONDS="${CCAR_CLOCK_RESYNC_SECONDS:-600}"  # min gap between reconciles
+CCAR_CLOCK_DRIFT_WARN_SECONDS="${CCAR_CLOCK_DRIFT_WARN_SECONDS:-5}"  # log when offset shifts more than this
+
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$CCAR_LOG"; }
+
+host_epoch() { # prints the external true-time epoch, or nothing on failure
+  [ -n "$CCAR_HOST_TIME_CMD" ] || return 1
+  local out
+  out="$(timeout 5 sh -c "$CCAR_HOST_TIME_CMD" 2>/dev/null | tr -dc '0-9')"
+  # Sanity-gate: a plausible current epoch is 10 digits (>= 2001, < 2286). This
+  # rejects empty output, error text, and millisecond epochs that would yield a
+  # wild offset.
+  case "$out" in
+    [1-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) printf '%s' "$out" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Recompute clock_offset from the external source. Rate-limited to once per
+# CCAR_CLOCK_RESYNC_SECONDS (measured on the RAW clock, which still ticks after a
+# resume even when offset is wrong) UNLESS $1 = "force" — used at the moments that
+# matter most (a detected suspend jump, and right around a wait).
+reconcile_clock() {
+  [ -n "$CCAR_HOST_TIME_CMD" ] || return 0
+  local raw host new
+  raw="$(date +%s)"
+  if [ "${1:-}" != force ] && [ $((raw - clock_last_resync)) -lt "$CCAR_CLOCK_RESYNC_SECONDS" ]; then
+    return 0
+  fi
+  clock_last_resync="$raw"
+  host="$(host_epoch)" || { log "clock reconcile: host time unavailable; keeping offset ${clock_offset}s"; return 0; }
+  new=$((host - raw))
+  local delta=$((new - clock_offset)); delta="${delta#-}"  # abs change since last offset
+  [ "$delta" -ge "$CCAR_CLOCK_DRIFT_WARN_SECONDS" ] && \
+    log "clock reconcile: local clock now ${new}s behind host (was ${clock_offset}s) — corrected the monitor's wait math"
+  clock_offset="$new"
+}
+
+now_epoch() { echo $(( $(date +%s) + clock_offset )); }  # true wall-clock "now"
 
 # A "paneref" is "<socket_path>\t<pane_id>"; address its tmux server with txp.
 # cc-run records one registry file per pane (CCAR_PANES_DIR), so the monitor
@@ -88,16 +143,19 @@ except Exception:
 PY
 }
 
-parse_screen_time() { # $1: pane text; prints next-future epoch or nothing
+parse_screen_time() { # $1: pane text, $2: true-now epoch; prints next-future epoch or nothing
   # Fallback only — used when the status line gave us no resets_at epoch. The
   # message is like "resets 4am (America/New_York)"; if a tz name is present we
   # interpret the clock time in THAT zone (so it's correct regardless of the
-  # machine's timezone), else we fall back to local time.
-  python3 - "$1" <<'PY'
+  # machine's timezone), else we fall back to local time. "now" is passed in as
+  # the reconciled wall-clock epoch (not datetime.now()) so the "already passed ->
+  # roll to tomorrow" logic stays correct even when the local clock has drifted.
+  python3 - "$1" "$2" <<'PY'
 import re, sys
 from datetime import datetime, timedelta
 
 text = sys.argv[1]
+now_epoch = int(sys.argv[2])
 
 tz = None
 mtz = re.search(r'\(([A-Za-z]+/[A-Za-z_]+)\)', text)
@@ -122,7 +180,7 @@ else:
 if not (0 <= hour <= 23 and 0 <= minute <= 59):
     print("")
     raise SystemExit
-now = datetime.now(tz)
+now = datetime.fromtimestamp(now_epoch, tz)
 t = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 if t <= now:  # bare times roll over midnight
     t += timedelta(days=1)
@@ -140,7 +198,7 @@ backoff_target() { # $1 = now epoch; echoes target epoch using current $backoff_
 
 compute_wait() { # $1 = a limited pane's screen text (fallback parse); echoes "<epoch> <mode>"
   local screen="${1:-}" now resets target parsed max
-  now=$(date +%s)
+  now=$(now_epoch)
   max=$((now + CCAR_MAX_WAIT_SECONDS))
 
   # 1) Authoritative reset epoch from the status line (timezone-independent). When
@@ -166,7 +224,7 @@ compute_wait() { # $1 = a limited pane's screen text (fallback parse); echoes "<
   fi
 
   # 2) No epoch available: parse a clock time off the pause screen.
-  parsed="$(parse_screen_time "$screen")"
+  parsed="$(parse_screen_time "$screen" "$now")"
   if [ -n "$parsed" ] && [ "$parsed" -gt "$now" ]; then
     target=$((parsed + CCAR_RESET_MARGIN_SECONDS))
     # A bare "4am" parsed after it already passed rolls to *tomorrow* (~24h away);
@@ -188,7 +246,8 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
   local target="$1" mode="$2" now remaining mins step before after
   while :; do
     [ -e "$CANCEL_FILE" ] && return 1
-    now=$(date +%s)
+    reconcile_clock   # rate-limited; keeps a long wait honest if the clock drifts
+    now=$(now_epoch)
     remaining=$((target - now))
     [ "$remaining" -le 0 ] && return 0
     mins=$(((remaining + 59) / 60))
@@ -199,10 +258,14 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
     fi
     step=$((remaining < 10 ? remaining : 10))
     before=$(date +%s); sleep "$step"; after=$(date +%s)
-    # A sleep that took far longer than asked means the machine suspended; the
-    # loop re-reads the clock above so timing is still correct — just note it.
-    [ $((after - before)) -gt $((step + 30)) ] && \
-      log "wall clock jumped ~$((after - before - step))s during wait (machine likely slept) — re-checking reset"
+    # A sleep that took far longer than asked means the machine suspended. Force an
+    # immediate clock reconcile (the guest clock may have frozen during suspend and
+    # now lags real time) so the next iteration's now_epoch reflects true wall time
+    # and we fire on schedule instead of waiting out a stale offset.
+    if [ $((after - before)) -gt $((step + 30)) ]; then
+      log "wall clock jumped ~$((after - before - step))s during wait (machine likely slept) — reconciling clock and re-checking reset"
+      reconcile_clock force
+    fi
   done
 }
 
@@ -336,6 +399,7 @@ while :; do
   fi
   idle_since=0
 
+  reconcile_clock   # rate-limited; ensures compute_wait sees a true "now"
   limited="$(detect_limited)"
   if [ -n "$limited" ]; then
     # First pane's screen feeds the pane-text time fallback in compute_wait.
