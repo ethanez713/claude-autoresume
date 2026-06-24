@@ -15,6 +15,7 @@ source "${CCAR_CONFIG:-$here/config.sh}"
 
 CANCEL_FILE="$CCAR_STATE_DIR/cancel"
 backoff_idx=0
+declare -A prompt_last_dismiss   # paneref -> epoch we last answered its rate-limit choice prompt (cooldown)
 
 # --- clock reconciliation ----------------------------------------------------
 # On WSL2 (and some VMs) the guest clock can freeze in the past when the host
@@ -246,6 +247,7 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
   local target="$1" mode="$2" now remaining mins step before after
   while :; do
     [ -e "$CANCEL_FILE" ] && return 1
+    scan_dismiss_prompts   # a pane hitting the limit mid-wait still gets its choice prompt answered
     reconcile_clock   # rate-limited; keeps a long wait honest if the clock drifts
     now=$(now_epoch)
     remaining=$((target - now))
@@ -335,6 +337,45 @@ is_paused_pane() { # $1 = paneref: do its bottom-most content lines show the lim
   [ -n "$scr" ] && printf '%s\n' "$scr" | grep -E -i -q "$CCAR_DETECT_REGEX"
 }
 
+# Newer Claude Code interposes a CHOICE prompt the instant the limit is hit, ahead
+# of the normal pause screen:
+#       What do you want to do?
+#     ❯ 1. Stop and wait for limit to reset
+#       2. Upgrade your plan
+# While it's up it BLOCKS text entry, so a later resume "continue" can't land. We
+# pick option 1 ("Stop and wait") to fall through to the pause screen — and we do
+# it the moment we see it, NOT at reset time. A per-pane cooldown stops us from
+# re-sending nav keys into the input box that returns afterward, where a stray
+# Up+Enter could resubmit recalled history.
+dismiss_limit_prompt() { # $1 = paneref; returns 0 only if it answered a prompt
+  [ -n "${CCAR_LIMIT_PROMPT_REGEX:-}" ] || return 1   # empty regex => feature disabled
+  local p="$1" pane scr now last
+  scr="$(capture "$p" | grep -v '^[[:space:]]*$' | tail -n "${CCAR_DETECT_TAIL_LINES:-15}")"
+  [ -n "$scr" ] && printf '%s\n' "$scr" | grep -E -i -q "$CCAR_LIMIT_PROMPT_REGEX" || return 1
+  now=$(now_epoch); last="${prompt_last_dismiss[$p]:-0}"
+  [ $((now - last)) -lt "${CCAR_PROMPT_COOLDOWN_SECONDS:-15}" ] && return 1  # answered it recently
+  prompt_last_dismiss[$p]=$now
+  pane="$(pr_pane "$p")"
+  if [ -n "${CCAR_LIMIT_PROMPT_NAV:-}" ]; then
+    # shellcheck disable=SC2086 — nav keys are intentionally word-split key names
+    txp "$p" send-keys -t "$pane" $CCAR_LIMIT_PROMPT_NAV
+    sleep 0.3   # let the menu redraw the selection before we confirm
+  fi
+  txp "$p" send-keys -t "$pane" "${CCAR_LIMIT_PROMPT_CONFIRM:-Enter}"
+  return 0
+}
+
+# Answer the choice prompt on every claude pane that shows it. Cheap to call on
+# each poll (and during a wait): when nothing asks, it just captures and returns.
+scan_dismiss_prompts() {
+  local p
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    dismiss_limit_prompt "$p" && \
+      log "rate-limit choice prompt on a pane — selected 'Stop and wait for limit to reset'"
+  done < <(claude_panes)
+}
+
 # Decide whether the account is rate-limited; if so, echo EVERY claude pane to
 # resume (the limit is account-wide, so all sessions are paused — we don't rely on
 # seeing the text in each one, which is what left sessions behind before). The
@@ -399,6 +440,7 @@ while :; do
   fi
   idle_since=0
 
+  scan_dismiss_prompts   # answer Claude Code's "Stop and wait / Upgrade" prompt the moment it appears
   reconcile_clock   # rate-limited; ensures compute_wait sees a true "now"
   limited="$(detect_limited)"
   if [ -n "$limited" ]; then

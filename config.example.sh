@@ -66,6 +66,24 @@ CCAR_RESUME_CLEAR="C-u"
 CCAR_RESUME_TEXT="continue"
 CCAR_FOREGROUND_CMDS="node claude"     # pane_current_command must be one of these before we send keys
 
+# --- rate-limit choice prompt ------------------------------------------------
+# Newer Claude Code interposes a CHOICE prompt the moment the limit is hit, ahead
+# of the normal pause screen:
+#       What do you want to do?
+#     ❯ 1. Stop and wait for limit to reset
+#       2. Upgrade your plan
+# While it's up it BLOCKS text entry, so the resume "continue" can't land. The
+# monitor watches for it on every poll and, the instant it appears, navigates to
+# option 1 ("Stop and wait") and confirms — no need to wait for the reset window.
+# Set CCAR_LIMIT_PROMPT_REGEX="" to disable this handling entirely.
+CCAR_LIMIT_PROMPT_REGEX="stop and wait for limit to reset"
+CCAR_LIMIT_PROMPT_NAV="Up Up"          # keys to land on option 1 (clamps at the top from the default selection)
+CCAR_LIMIT_PROMPT_CONFIRM="Enter"      # key to confirm the selection
+# Don't re-answer the same pane more than once per this many seconds: once the
+# prompt is dismissed the input box returns, and a stray Up+Enter there could
+# resubmit recalled history, so we guard against double-firing across polls.
+CCAR_PROMPT_COOLDOWN_SECONDS=15
+
 # --- wait logic --------------------------------------------------------------
 CCAR_RESET_MARGIN_SECONDS=30           # wait until resets_at + this margin
 # Backoff used ONLY when no resets_at is available (minutes): 2,4,8,16,30 then hold at 30.
