@@ -16,6 +16,7 @@ source "${CCAR_CONFIG:-$here/config.sh}"
 CANCEL_FILE="$CCAR_STATE_DIR/cancel"
 backoff_idx=0
 declare -A prompt_last_dismiss   # paneref -> epoch we last answered its rate-limit choice prompt (cooldown)
+status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
 # --- clock reconciliation ----------------------------------------------------
 # On WSL2 (and some VMs) the guest clock can freeze in the past when the host
@@ -102,12 +103,14 @@ status_set() { # $1 = text
   while IFS=$'\t' read -r socket session; do
     [ -n "$socket" ] && tmux -S "$socket" set-option -t "$session" status-right "$1" 2>/dev/null
   done < <(live_sessions)
+  status_active=1
 }
 status_clear() {
   local socket session
   while IFS=$'\t' read -r socket session; do
     [ -n "$socket" ] && tmux -S "$socket" set-option -u -t "$session" status-right 2>/dev/null
   done < <(live_sessions)
+  status_active=0
 }
 
 capture() { txp "$1" capture-pane -p -t "$(pr_pane "$1")" 2>/dev/null; }  # $1 = paneref
@@ -495,6 +498,13 @@ while :; do
         log "resumed $(count "$confirmed") pane(s)"
       fi
     fi
+  elif [ "$status_active" -eq 1 ]; then
+    # Nothing is limited, but a countdown is still painted — the limit cleared on
+    # its OWN (e.g. the window reset after a failed resume escalated to backoff),
+    # so none of the resume/resolution paths above ran to wipe it. Clear it now so
+    # the tab doesn't keep showing a stale "resume HH:MM" long after the reset.
+    status_clear
+    log "no active limit but a countdown was still shown — cleared it"
   fi
   sleep "$CCAR_POLL_SECONDS"
 done
