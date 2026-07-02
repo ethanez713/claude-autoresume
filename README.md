@@ -15,20 +15,26 @@ the window resets. No relaunch, same conversations/context.
 current pane (no new server, no nesting); **outside tmux** it falls back to
 building a private-socket session and attaching. Either way it records the pane
 in a small registry and starts one background monitor. The monitor watches every
-registered pane (across your own tmux server and the fallback alike), gates on the
-authoritative `used_percentage` written to a state file by the patched
-`~/.claude/statusline.py` (so on-screen text can't fool it), waits until
-`resets_at`, then drives the un-pause across all panes with `tmux send-keys`.
-See **[PLAN.md](PLAN.md)** for the full design.
+registered pane (across your own tmux server and the fallback alike) and flags
+each pane the moment it shows evidence of hitting the limit — the pause message
+on screen, the rate-limit choice prompt (which it answers), or the
+`used_percentage` signal written to a state file by the patched
+`~/.claude/statusline.py`. It waits until `resets_at`, then un-pauses each
+flagged pane with `tmux send-keys` — but only if the pane still looks paused (a
+frozen screen, unchanged since the pause), so it never types into active work
+and never misses a pane whose message got buried by UI chrome. See
+**[PLAN.md](PLAN.md)** for the full design.
 
 ## Status
 
-**Built and in daily use.** All mechanics dry-run validated (detection
-false-positive veto, usage-trigger, viewport-independent multi-pane resume,
-bottom-anchored fallback, sleep/wake, cancel, native passthrough, per-dir
-windows). One item still needs a real limit to finalize — see **PLAN.md §9**:
-confirming `CCAR_RESUME_TEXT` un-pauses claude and whether a menu needs
-`CCAR_RESUME_PREKEYS`.
+**Built and in daily use.** Detection and resume are validated end-to-end
+against scratch tmux panes painted with real pause screens: false-positive
+vetoes (limit phrase or quoted choice menu in a conversation), the pause message
+buried under a todo checklist or scrolled off-screen entirely, hand-resumed
+panes skipped, idle panes never injected, sleep/wake, cancel, native
+passthrough, per-dir windows. One item still needs a real limit to finalize —
+see **PLAN.md §9**: confirming `CCAR_RESUME_TEXT` un-pauses claude and whether a
+menu needs `CCAR_RESUME_PREKEYS`.
 
 ## One-time setup
 

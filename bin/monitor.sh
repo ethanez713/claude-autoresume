@@ -3,10 +3,21 @@
 # (the registry CCAR_PANES_DIR, written by cc-run, spanning your own tmux server
 # and the ccar fallback) for the account-wide rate limit, waits until the window
 # resets (resets_at from state.json, else pane-text time, else backoff), then
-# resumes every paused session. Detection is gated on the status line's
-# used_percentage (authoritative + account-global) so it can't be fooled by a
-# session that merely displays the limit text. 100% local: no network, bash +
-# tmux + python stdlib.
+# resumes the paused sessions.
+#
+# Detection is a per-pane LATCH, not a point-in-time text match: when a pane
+# shows evidence it hit the limit (the choice prompt we answer, the pause
+# message anywhere on its screen, or the account usage crossing the limit), the
+# monitor flags it and remembers a snapshot of its paused screen. At reset time
+# it resumes each latched pane unless there is positive evidence it un-paused
+# (screen changed since the pause / actively repainting). This guards BOTH ways:
+# no "continue" into a pane that wasn't limited or is mid-work (false positive),
+# and no paused pane skipped because UI chrome (todo list, spinner) pushed the
+# pause message around the screen (false negative). Usage readings from the
+# status line are only trusted inside their validity window: a >=limit reading
+# until its own resets_at passes, a clear reading while fresh — a stale number
+# is treated as unknown, never as truth. 100% local: no network, bash + tmux +
+# python stdlib.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,7 +26,26 @@ source "${CCAR_CONFIG:-$here/config.sh}"
 
 CANCEL_FILE="$CCAR_STATE_DIR/cancel"
 backoff_idx=0
-declare -A prompt_last_dismiss   # paneref -> epoch we last answered its rate-limit choice prompt (cooldown)
+declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate-limit choice prompt (cooldown)
+# Per-pane rate-limit latch (the monitor's memory of who got limited):
+#   pane_latch[paneref] = seen  — per-pane evidence: we answered its choice
+#                                 prompt, or its screen showed the pause message
+#                       = usage — account-level evidence only (usage >= limit
+#                                 while this pane showed nothing itself)
+#   pane_snap[paneref]  = hash of the pane's screen when it last looked paused;
+#                         "unchanged since then" is the resume-safety signal
+#   pane_snap_ok[paneref] = 1 once the snapshot is trustworthy: taken from a
+#                         screen that showed the pause message, or settled (two
+#                         consecutive scans identical — a latch can fire while a
+#                         pane is still painting, and a snapshot of a moving
+#                         screen would make the gate see phantom "activity")
+# In-memory only: a restarted monitor re-derives latches from the pause screens,
+# which stay painted until something is sent to the pane.
+# (=() matters: bash 5.1 + set -u treats a declared-but-never-assigned array as
+# unbound when expanding ${#arr[@]}.)
+declare -A pane_latch=()
+declare -A pane_snap=()
+declare -A pane_snap_ok=()
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
 # --- clock reconciliation ----------------------------------------------------
@@ -115,6 +145,20 @@ status_clear() {
 
 capture() { txp "$1" capture-pane -p -t "$(pr_pane "$1")" 2>/dev/null; }  # $1 = paneref
 
+hash_of() { printf '%s' "$1" | sha1sum | cut -d' ' -f1; }  # $1 = screen text
+
+screen_shows_limit() { # $1 = screen text: pause message anywhere on the visible screen
+  [ -n "$1" ] && printf '%s\n' "$1" | grep -E -i -q "$CCAR_DETECT_REGEX"
+}
+
+# Pause message in the pane's recent output (visible screen + last N history
+# lines). A paused pane keeps the message in its transcript even when UI chrome
+# (todo checklist, spinner) has pushed it off the visible screen entirely.
+history_shows_limit() { # $1 = paneref
+  txp "$1" capture-pane -p -S "-${CCAR_DETECT_HISTORY_LINES:-60}" -t "$(pr_pane "$1")" 2>/dev/null \
+    | grep -E -i -q "$CCAR_DETECT_REGEX"
+}
+
 foreground_is_claude() { # $1 = paneref
   local cmd c
   cmd="$(txp "$1" display-message -p -t "$(pr_pane "$1")" '#{pane_current_command}' 2>/dev/null)" || return 1
@@ -136,15 +180,50 @@ except Exception:
 PY
 }
 
-read_used_pct() { # prints the 5h window used_percentage from state.json, or nothing
+read_state_json() { # prints "used_percentage<TAB>resets_at<TAB>captured_at" (fields empty when absent)
   python3 - "$CCAR_STATE_JSON" <<'PY'
 import json, sys
+used = resets = captured = ""
 try:
-    v = json.load(open(sys.argv[1])).get("used_percentage")
-    print(v if v is not None else "")
+    d = json.load(open(sys.argv[1]))
+    if d.get("used_percentage") is not None: used = str(d["used_percentage"])
+    if d.get("resets_at") is not None: resets = str(int(d["resets_at"]))
+    if d.get("captured_at") is not None: captured = str(int(d["captured_at"]))
 except Exception:
-    print("")
+    pass
+print(used + "\t" + resets + "\t" + captured)
 PY
+}
+
+# The status line's used_percentage, interpreted ONLY inside its validity window.
+# The status line renders (and writes state.json) while sessions are active, then
+# goes silent when everything pauses — so the file is often STALE precisely when
+# the monitor is working. Trusting a stale number either way caused real bugs
+# (a pre-reset >=95 kept re-triggering detection in a 5s busy-loop after the
+# window had already reset). Rules:
+#   limited — used >= CCAR_LIMIT_PCT and its own resets_at is still in the
+#             future (a limit reading self-expires at its reset)
+#   clear   — used < CCAR_LIMIT_PCT and captured within
+#             CCAR_USAGE_FRESH_SECONDS (a clear reading is only a veto while
+#             fresh; sessions were rendering the status line moments ago)
+#   unknown — anything else (missing file, unpatched status line, stale data):
+#             fall back to per-pane screen evidence alone
+usage_state() { # echoes limited | clear | unknown
+  local used resets captured now
+  IFS=$'\t' read -r used resets captured < <(read_state_json)
+  [ -n "$used" ] || { echo unknown; return; }
+  now=$(now_epoch)
+  if awk "BEGIN{exit !($used >= ${CCAR_LIMIT_PCT:-95})}" 2>/dev/null; then
+    if [ -n "$resets" ] && [ "$now" -lt "$resets" ]; then
+      echo limited
+    else
+      echo unknown
+    fi
+  elif [ -n "$captured" ] && [ $((now - captured)) -le "${CCAR_USAGE_FRESH_SECONDS:-600}" ]; then
+    echo clear
+  else
+    echo unknown
+  fi
 }
 
 parse_screen_time() { # $1: pane text, $2: true-now epoch; prints next-future epoch or nothing
@@ -250,7 +329,7 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
   local target="$1" mode="$2" now remaining mins step before after
   while :; do
     [ -e "$CANCEL_FILE" ] && return 1
-    scan_dismiss_prompts   # a pane hitting the limit mid-wait still gets its choice prompt answered
+    scan_panes   # a pane hitting the limit mid-wait still gets latched + its choice prompt answered
     reconcile_clock   # rate-limited; keeps a long wait honest if the clock drifts
     now=$(now_epoch)
     remaining=$((target - now))
@@ -330,14 +409,9 @@ claude_panes() { # panerefs of every live registered pane whose foreground is cl
   done < <(registry_panerefs)
 }
 
-is_paused_pane() { # $1 = paneref: do its bottom-most content lines show the limit?
-  # Anchored to the last N NON-BLANK lines (capture-pane pads to full pane height
-  # with blank rows, so a plain tail would just grab those). The genuine pause
-  # sits near the bottom, above the input box; a mention up in the scrollback
-  # falls outside the window.
-  local scr
-  scr="$(capture "$1" | grep -v '^[[:space:]]*$' | tail -n "${CCAR_DETECT_TAIL_LINES:-15}")"
-  [ -n "$scr" ] && printf '%s\n' "$scr" | grep -E -i -q "$CCAR_DETECT_REGEX"
+unlatch_pane() { # $1 = paneref
+  local p="$1"
+  unset 'pane_latch[$p]' 'pane_snap[$p]' 'pane_snap_ok[$p]'
 }
 
 # Newer Claude Code interposes a CHOICE prompt the instant the limit is hit, ahead
@@ -349,12 +423,15 @@ is_paused_pane() { # $1 = paneref: do its bottom-most content lines show the lim
 # pick option 1 ("Stop and wait") to fall through to the pause screen — and we do
 # it the moment we see it, NOT at reset time. A per-pane cooldown stops us from
 # re-sending nav keys into the input box that returns afterward, where a stray
-# Up+Enter could resubmit recalled history.
-dismiss_limit_prompt() { # $1 = paneref; returns 0 only if it answered a prompt
+# Up+Enter could resubmit recalled history. The match is anchored to the BOTTOM
+# lines (the live menu sits at the very bottom of the pane) because the nav keys
+# are the most dangerous thing we send — a conversation that merely QUOTES the
+# menu text must not trigger them (the caller also vetoes when usage reads clear).
+dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 only if it answered
   [ -n "${CCAR_LIMIT_PROMPT_REGEX:-}" ] || return 1   # empty regex => feature disabled
-  local p="$1" pane scr now last
-  scr="$(capture "$p" | grep -v '^[[:space:]]*$' | tail -n "${CCAR_DETECT_TAIL_LINES:-15}")"
-  [ -n "$scr" ] && printf '%s\n' "$scr" | grep -E -i -q "$CCAR_LIMIT_PROMPT_REGEX" || return 1
+  local p="$1" pane tail now last
+  tail="$(printf '%s\n' "$2" | grep -v '^[[:space:]]*$' | tail -n "${CCAR_PROMPT_TAIL_LINES:-15}")"
+  [ -n "$tail" ] && printf '%s\n' "$tail" | grep -E -i -q "$CCAR_LIMIT_PROMPT_REGEX" || return 1
   now=$(now_epoch); last="${prompt_last_dismiss[$p]:-0}"
   [ $((now - last)) -lt "${CCAR_PROMPT_COOLDOWN_SECONDS:-15}" ] && return 1  # answered it recently
   prompt_last_dismiss[$p]=$now
@@ -368,52 +445,79 @@ dismiss_limit_prompt() { # $1 = paneref; returns 0 only if it answered a prompt
   return 0
 }
 
-# Answer the choice prompt on every claude pane that shows it. Cheap to call on
-# each poll (and during a wait): when nothing asks, it just captures and returns.
-scan_dismiss_prompts() {
-  local p
+# One pass over every claude pane: answer choice prompts and update the latches.
+# Called on every poll of the main loop AND every iteration of a wait, so a pane
+# that pauses mid-wait is still caught, and a latched pane's snapshot tracks the
+# last screen that positively looked paused (robust to redraws/resizes while the
+# pause message stays visible). A fresh sub-limit usage reading vetoes BOTH the
+# prompt answer and the text latch — that is what stops a conversation that
+# merely displays the limit phrase (or quotes the choice menu) from triggering
+# key injection while the account is demonstrably not limited.
+scan_panes() {
+  local p scr ustate was
+  ustate="$(usage_state)"
   while IFS= read -r p; do
     [ -z "$p" ] && continue
-    dismiss_limit_prompt "$p" && \
-      log "rate-limit choice prompt on a pane — selected 'Stop and wait for limit to reset'"
+    scr="$(capture "$p")"
+    if [ "$ustate" != clear ] && dismiss_limit_prompt "$p" "$scr"; then
+      [ "${pane_latch[$p]:-}" ] || log "rate-limit choice prompt on a pane — selected 'Stop and wait'; latched it as limited"
+      pane_latch[$p]=seen
+      continue   # screen is mid-redraw; snapshot it on the next pass
+    fi
+    was="${pane_latch[$p]:-}"
+    if [ "$ustate" != clear ] && screen_shows_limit "$scr"; then
+      [ "$was" = seen ] || log "pane latched as limited (pause message on screen)"
+      pane_latch[$p]=seen
+      pane_snap[$p]="$(hash_of "$scr")"
+      pane_snap_ok[$p]=1                  # snapshot of an actual pause screen — trusted
+    elif [ "$ustate" = limited ] && [ -z "$was" ]; then
+      log "pane latched as limited (account usage >= ${CCAR_LIMIT_PCT:-95}%)"
+      pane_latch[$p]=usage
+      pane_snap[$p]="$(hash_of "$scr")"
+      pane_snap_ok[$p]=0                  # provisional until the screen settles
+    elif [ -n "$was" ] && [ "${pane_snap_ok[$p]:-0}" != 1 ]; then
+      # Latched without ever seeing the pause message on screen (usage/prompt
+      # latch): chase the screen until two consecutive scans agree, then freeze
+      # the snapshot. A pane still repainting at latch time would otherwise pin
+      # a mid-paint snapshot and the resume gate would see phantom activity.
+      if [ -n "${pane_snap[$p]:-}" ] && [ "$(hash_of "$scr")" = "${pane_snap[$p]}" ]; then
+        pane_snap_ok[$p]=1
+      else
+        pane_snap[$p]="$(hash_of "$scr")"
+        pane_snap_ok[$p]=0
+      fi
+    fi
   done < <(claude_panes)
 }
 
-# Decide whether the account is rate-limited; if so, echo EVERY claude pane to
-# resume (the limit is account-wide, so all sessions are paused — we don't rely on
-# seeing the text in each one, which is what left sessions behind before). The
-# status line's used_percentage is authoritative: it both triggers detection and
-# vetoes false positives from a session that merely displays the limit phrase.
-detect_limited() { # echoes panerefs to resume, or nothing
-  local panes used p
-  panes="$(claude_panes)"
-  [ -z "$panes" ] && return
-  used="$(read_used_pct)"
-  if [ -n "$used" ]; then
-    # Authoritative usage known: trust the number, ignore on-screen text entirely.
-    awk "BEGIN{exit !($used >= ${CCAR_LIMIT_PCT:-95})}" && echo "$panes"
-    return
+# Resume gate, evaluated per latched pane at reset time. Resume when:
+#   a) the pause message is on the visible screen AND the screen is static
+#      (double-capture CCAR_SETTLE_SECONDS apart) — a paused TUI is frozen,
+#      active work repaints every second; or
+#   b) the screen is byte-identical to the snapshot from when it last looked
+#      paused — untouched since the pause, even if UI chrome hides the message;
+#      a usage-only latch (no per-pane evidence ever) additionally needs the
+#      message in recent history, so an idle pane that was never interrupted
+#      is not injected just because the account was limited.
+# Anything else means the pane changed since it was paused (user typed, resumed
+# by hand, new output) — skip it rather than inject into work we can't see.
+should_resume() { # $1 = paneref
+  local p="$1" scr h
+  scr="$(capture "$p")"
+  h="$(hash_of "$scr")"
+  if screen_shows_limit "$scr"; then
+    sleep "${CCAR_SETTLE_SECONDS:-2}"
+    [ "$(hash_of "$(capture "$p")")" = "$h" ] && return 0
+    return 1   # showing the message but repainting => active work; never inject
   fi
-  # No usage data (status line unpatched / not yet rendered): fall back to
-  # bottom-anchored pane text — if ANY claude pane is paused, all of them are.
-  while IFS= read -r p; do
-    [ -z "$p" ] && continue
-    if is_paused_pane "$p"; then echo "$panes"; return; fi
-  done <<<"$panes"
+  if [ "${pane_snap_ok[$p]:-0}" = 1 ] && [ "$h" = "${pane_snap[$p]:-}" ]; then
+    [ "${pane_latch[$p]}" = seen ] && return 0
+    history_shows_limit "$p" && return 0
+  fi
+  return 1
 }
 
 count() { [ -z "$1" ] && echo 0 || grep -c . <<<"$1"; }
-
-# Panerefs present in BOTH newline-separated lists. Resume targets are the
-# intersection of (panes limited AT DETECTION) and (panes still limited/alive NOW),
-# so a pane OPENED during the wait — never rate-limited, maybe mid-task — is never
-# resumed (it's in the second list but not the first), and a pane CLOSED during the
-# wait is silently dropped (in the first but not the second). Pane ids are stable
-# and never reused within a tmux server, so this matches by identity, not position.
-intersect_panes() { # $1, $2 = newline-separated paneref lists
-  comm -12 <(printf '%s' "$1" | grep -v '^$' | sort -u) \
-           <(printf '%s' "$2" | grep -v '^$' | sort -u)
-}
 
 # When sourced (tests), expose the functions but don't enter the loop.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
@@ -443,63 +547,65 @@ while :; do
   fi
   idle_since=0
 
-  scan_dismiss_prompts   # answer Claude Code's "Stop and wait / Upgrade" prompt the moment it appears
   reconcile_clock   # rate-limited; ensures compute_wait sees a true "now"
-  limited="$(detect_limited)"
-  if [ -n "$limited" ]; then
-    # First pane's screen feeds the pane-text time fallback in compute_wait.
-    read -r target mode <<<"$(compute_wait "$(capture "$(head -1 <<<"$limited")")")"
-    log "limit detected ($(count "$limited") claude pane(s)); waiting until $(date -d "@$target" '+%F %T') ($mode)"
+  scan_panes
+  if [ "${#pane_latch[@]}" -gt 0 ]; then
+    # Any latched pane's screen feeds the pane-text time fallback in compute_wait.
+    first=""
+    for p in "${!pane_latch[@]}"; do first="$p"; break; done
+    read -r target mode <<<"$(compute_wait "$(capture "$first")")"
+    log "limit latched on ${#pane_latch[@]} pane(s); waiting until $(date -d "@$target" '+%F %T') ($mode)"
     if ! wait_until "$target" "$mode"; then
       rm -f "$CANCEL_FILE"
       status_clear
       log "cancelled during wait — monitor exiting (cc-run restarts it)"
       exit 0
     fi
-    # Re-evaluate after the wait (windows/usage may have changed). Only resume the
-    # panes that were limited at detection AND are still live and limited now — NOT
-    # whatever claude panes happen to exist now. Panes opened during the wait were
-    # never rate-limited; injecting "continue" into them is the wrong-window /
-    # needless-work bug. A pane opened-and-paused during the wait is harmless: it's
-    # caught as a fresh detection on the next loop pass.
-    still="$(detect_limited)"
-    resume="$(intersect_panes "$limited" "$still")"
-    # Belt-and-suspenders: of the still-limited captured panes, resume ONLY those
-    # whose OWN bottom screen still shows the limit message. A genuinely-paused pane
-    # keeps displaying that message until something is sent to it (a window reset
-    # doesn't redraw it), so this never strands one; but a pane the user resumed by
-    # hand mid-wait (now mid-task or at a clean prompt) no longer shows it and is
-    # skipped — so we never inject "continue" into active work.
-    confirmed=""
-    while IFS= read -r p; do
-      [ -z "$p" ] && continue
-      if is_paused_pane "$p"; then
-        confirmed+="$p"$'\n'
+    # The latch set is the resume set — panes limited at detection or that latched
+    # during the wait. A pane opened during the wait never latches (no evidence),
+    # so it is never injected; a latched pane that died is dropped here.
+    resumed=""
+    for p in "${!pane_latch[@]}"; do
+      if ! pane_alive "$p"; then unlatch_pane "$p"; continue; fi
+      if should_resume "$p"; then
+        send_resume "$p"
+        resumed+="$p"$'\n'
       else
-        log "skipping a captured pane that no longer shows the limit message (resumed by hand?)"
+        log "skipping a latched pane: screen changed since the pause and no limit message is visible (resumed by hand?)"
+        unlatch_pane "$p"
       fi
-    done <<<"$resume"
-    confirmed="${confirmed%$'\n'}"
-    if [ -z "$confirmed" ]; then
+    done
+    resumed="${resumed%$'\n'}"
+    if [ -z "$resumed" ]; then
       backoff_idx=0
       status_clear
-      log "no captured pane still shows the limit after the wait — no resume needed"
+      log "no latched pane needed a resume"
     else
-      while IFS= read -r p; do [ -n "$p" ] && send_resume "$p"; done <<<"$confirmed"
-      log "resume sent to $(count "$confirmed") pane(s)"
+      log "resume sent to $(count "$resumed") pane(s)"
       sleep "${CCAR_GRACE_SECONDS:-15}"
-      after="$(intersect_panes "$limited" "$(detect_limited)")"
-      if [ -n "$after" ]; then
+      # A pane whose screen still shows the pause message did not un-pause: keep
+      # its latch so the next pass retries (compute_wait escalates to backoff on a
+      # stale resets_at). A pane that repainted is running again — unlatch it.
+      stuck=0
+      while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        if pane_alive "$p" && screen_shows_limit "$(capture "$p")"; then
+          stuck=$((stuck + 1))
+        else
+          unlatch_pane "$p"
+        fi
+      done <<<"$resumed"
+      if [ "$stuck" -gt 0 ]; then
         backoff_idx=$((backoff_idx + 1))
-        log "still limited after resume ($(count "$after") pane(s)) — escalating backoff (idx $backoff_idx)"
+        log "still limited after resume ($stuck pane(s)) — escalating backoff (idx $backoff_idx)"
       else
         backoff_idx=0
         status_clear
-        log "resumed $(count "$confirmed") pane(s)"
+        log "resumed $(count "$resumed") pane(s)"
       fi
     fi
   elif [ "$status_active" -eq 1 ]; then
-    # Nothing is limited, but a countdown is still painted — the limit cleared on
+    # Nothing is latched, but a countdown is still painted — the limit cleared on
     # its OWN (e.g. the window reset after a failed resume escalated to backoff),
     # so none of the resume/resolution paths above ran to wipe it. Clear it now so
     # the tab doesn't keep showing a stale "resume HH:MM" long after the reset.

@@ -37,15 +37,29 @@ CCAR_STATE_JSON="$CCAR_STATE_DIR/state.json"
 # local render of rate_limits.five_hour.resets_at (the authoritative signal).
 CCAR_DETECT_REGEX="(hit your (session|usage) limit|usage limit reached|session limit.*reset)"
 CCAR_POLL_SECONDS=5                    # how often to poll while watching
-# Authoritative detection: the account is treated as rate-limited when the status
-# line's five-hour used_percentage (in state.json) is at/above this. This both
-# triggers detection AND vetoes false positives from a session that merely shows
-# the limit phrase on screen (e.g. a conversation about rate limits).
+# The account is treated as rate-limited when the status line's five-hour
+# used_percentage (in state.json) is at/above this — but only while the reading
+# is inside its validity window (see CCAR_USAGE_FRESH_SECONDS). A valid reading
+# at/above triggers a latch on every claude pane; a valid reading below vetoes
+# text detection (a conversation merely showing the limit phrase can't latch).
 CCAR_LIMIT_PCT=95
-# Fallback only (when state.json has no usage data): match CCAR_DETECT_REGEX
-# against just the last N visible lines of a pane, so a mention of the phrase up
-# in the scrollback isn't mistaken for a live pause at the bottom of the screen.
-CCAR_DETECT_TAIL_LINES=15
+# The status line only writes state.json while a session renders it, so the file
+# goes stale exactly when everything is paused. A >= CCAR_LIMIT_PCT reading stays
+# valid until its own resets_at passes; a below-limit reading is only trusted as
+# a veto for this many seconds after captured_at. Outside those windows usage is
+# treated as UNKNOWN and detection falls back to per-pane screen evidence.
+CCAR_USAGE_FRESH_SECONDS=600
+# The pause message is matched against the pane's FULL visible screen (UI chrome
+# like a todo checklist can push it well above the bottom lines — that once made
+# the monitor skip a genuinely paused pane). For panes latched on account usage
+# alone, the resume gate additionally looks for the message within this many
+# recent history lines, so a pane whose message scrolled off-screen entirely is
+# still resumable while an idle never-interrupted pane is not.
+CCAR_DETECT_HISTORY_LINES=60
+# Resume safety: a candidate pane showing the pause message is double-captured
+# this many seconds apart and must be IDENTICAL (a paused TUI is frozen; active
+# work repaints every second) before "continue" is sent into it.
+CCAR_SETTLE_SECONDS=2
 
 # --- resume action -----------------------------------------------------------
 # Keystrokes to un-pause. PREKEYS are sent first (e.g. to dismiss a menu), then
@@ -79,6 +93,12 @@ CCAR_FOREGROUND_CMDS="node claude"     # pane_current_command must be one of the
 CCAR_LIMIT_PROMPT_REGEX="stop and wait for limit to reset"
 CCAR_LIMIT_PROMPT_NAV="Up Up"          # keys to land on option 1 (clamps at the top from the default selection)
 CCAR_LIMIT_PROMPT_CONFIRM="Enter"      # key to confirm the selection
+# The live menu sits at the very bottom of the pane, so the prompt match is
+# anchored to the last N non-blank lines — and a fresh below-limit usage reading
+# vetoes it too. Both guards exist because the nav keys are the most dangerous
+# send (a stray Up+Enter in a normal input box resubmits recalled history), so a
+# conversation that merely QUOTES the menu text must not trigger them.
+CCAR_PROMPT_TAIL_LINES=15
 # Don't re-answer the same pane more than once per this many seconds: once the
 # prompt is dismissed the input box returns, and a stray Up+Enter there could
 # resubmit recalled history, so we guard against double-firing across polls.

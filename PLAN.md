@@ -110,32 +110,67 @@ Three design decisions carry the whole thing:
 
 - **`config.sh`** (from `config.example.sh`, gitignored) — all tunables.
 
-## 4. Detection (`detect_limited`)
+## 4. Detection: per-pane latch + evidence-gated resume
 
-The account is limited per the authoritative status-line usage; on-screen text is
-secondary. When limited, **every** claude pane is returned for resuming.
+Detection is a **per-pane latch**, not a point-in-time text match. The monitor
+separates the two questions that used to be conflated — *"did this pane hit the
+limit?"* (answered eagerly, latched) and *"is it still paused right now?"*
+(answered at reset time, from evidence) — so a false positive and a false
+negative are guarded independently.
+
+**Latching** (every poll, and every ~10s during a wait), per claude pane
+(`pane_current_command ∈ CCAR_FOREGROUND_CMDS`):
 
 ```
-panes := all panes whose pane_current_command ∈ CCAR_FOREGROUND_CMDS (claude/node)
-used  := state.json.used_percentage
-if used is known:
-    limited  ⇔  used ≥ CCAR_LIMIT_PCT (default 95)   # authoritative; ignore text
-else:                                                # no usage data → fallback
-    limited  ⇔  any pane's last CCAR_DETECT_TAIL_LINES *non-blank* lines
-               match CCAR_DETECT_REGEX                # bottom-anchored
-if limited: resume ALL claude panes
+latch := seen   if we answered its rate-limit choice prompt, or the pause
+                message is anywhere on its FULL visible screen
+      |  usage  if the account usage signal reads limited and the pane
+                showed nothing itself (limit is account-wide)
+snap  := hash of the screen when the pane last looked paused (a snapshot
+         taken without text evidence is provisional until two consecutive
+         scans agree — a latch can fire while a pane is still painting)
 ```
 
-Why this shape (both learned from a live test):
-- **Usage gate kills false positives.** A session that merely *displays* the limit
-  phrase (e.g. a conversation about rate limits) used to send the monitor into a
-  bogus multi-hour wait. The `used < CCAR_LIMIT_PCT` veto stops that.
-- **Resume-all stops sessions being left behind.** Per-pane text matching missed
-  panes whose message had scrolled out of the viewport. Since the limit is
-  account-wide, once limited we resume every claude pane regardless of what's
-  visible.
-- The fallback is anchored to the last *non-blank* lines because `capture-pane`
-  pads to full pane height with blank rows (a naive `tail` grabs only blanks).
+**Usage signal validity.** The status line only writes `state.json` while a
+session renders it, so the file goes stale exactly when everything is paused
+(that staleness once kept re-triggering detection in a 5s busy-loop after the
+window had already reset). A reading is interpreted only inside its window:
+
+```
+limited — used ≥ CCAR_LIMIT_PCT and its own resets_at is still in the future
+clear   — used < CCAR_LIMIT_PCT and captured within CCAR_USAGE_FRESH_SECONDS
+unknown — anything else (missing/unpatched/stale) → per-pane evidence only
+```
+
+`clear` vetoes both the text latch and the choice-prompt answer — that is what
+stops a conversation merely *displaying* the limit phrase (or quoting the menu)
+from triggering key injection. `limited` latches every claude pane.
+
+**Resume gate** (at reset time, per latched pane). Resume when:
+- the pause message is on the visible screen **and** the screen is static
+  (double-capture `CCAR_SETTLE_SECONDS` apart — a paused TUI is frozen, active
+  work repaints every second); or
+- the screen is byte-identical to the pause snapshot; a `usage`-only latch
+  additionally needs the message within `CCAR_DETECT_HISTORY_LINES` of recent
+  history, so an idle pane that was never interrupted is not injected.
+
+Anything else means the pane changed since it paused (user typed, resumed by
+hand) — skip it rather than inject into work we can't see.
+
+Why this shape (all learned from live limits):
+- **The old post-wait confirmation was bottom-anchored to the last 15 non-blank
+  lines and a todo checklist pushed the pause message above it** — the monitor
+  skipped genuinely paused panes ("resumed by hand?") every 5s for hours. The
+  latch + full-screen/history matching fixes that class of miss; the frozen-
+  screen check replaces the brittle text re-find as the "still paused" test.
+- **Usage gate kills false positives** — but only while the reading is valid;
+  trusting a stale ≥95 re-triggered detection forever, and a fresh sub-limit
+  reading is the veto that lets dev sessions *about* this project display the
+  pause phrase safely.
+- **The latch is the resume set.** A pane opened during the wait never latches
+  (no evidence), so it is never injected; a latched pane that died is dropped.
+  Latches live in memory only — a restarted monitor re-derives them from the
+  pause screens, which stay painted until something is sent to the pane.
 
 ## 5. Wait logic (`compute_wait`) + sleep/wake safety
 
@@ -175,10 +210,11 @@ Linux where `systemd-timesyncd` already keeps the clock honest.
 **Countdown.** `status-right` shows `⏳ resume HH:MM (in Xm)` (reset path) or
 `⏳ retry in Xm` (backoff), cleared on resume/cancel.
 
-After the wait, re-evaluate, then `send_resume` (optional `CCAR_RESUME_PREKEYS`,
-**clear the input** via `CCAR_RESUME_CLEAR`, then literal `CCAR_RESUME_TEXT`, then
-Enter) to each still-limited pane; grace re-check escalates backoff if still
-limited.
+After the wait, each latched pane goes through the resume gate (§4), then
+`send_resume` (optional `CCAR_RESUME_PREKEYS`, **clear the input** via
+`CCAR_RESUME_CLEAR`, then literal `CCAR_RESUME_TEXT`, then Enter); the grace
+re-check keeps the latch and escalates backoff for any pane whose screen still
+shows the pause message.
 
 **Why clear first (learned from a multi-pane resume).** The same `send_resume`
 went to four panes; three submitted `continue the above workflow`, but one
@@ -213,12 +249,13 @@ native.
 ## 8. Done
 
 Status-line patch · launcher with passthrough + window-per-dir + alias-safe `exec`
-· single account-wide monitor with usage-gated detection, resume-all, compute_wait
-+ sleep/wake safety, countdown, backoff · cancel chord · private-socket rendering
-fixes + tab-title forwarding · README + `~/.bashrc` alias. All dry-run validated
-(detection FP-veto / usage-trigger / viewport-independent resume / bottom-anchored
-fallback / multi-pane resume-all / sleep-through / cancel / passthrough / per-dir
-windows). The real pause message is
+· single account-wide monitor with per-pane latch detection + evidence-gated
+resume (§4), compute_wait + sleep/wake safety, countdown, backoff · cancel chord
+· private-socket rendering fixes + tab-title forwarding · README + `~/.bashrc`
+alias. Validated end-to-end against a scratch tmux server with fake panes:
+checklist-below-the-message resume (the live failure), fresh-usage FP veto (text
++ quoted choice menu), hand-resume skip, message-only-in-history resume,
+idle-pane non-injection, choice-prompt answer. The real pause message is
 `You've hit your session limit · resets 4am (America/New_York)`.
 
 ## 9. Open
