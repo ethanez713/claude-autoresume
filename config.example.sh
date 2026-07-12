@@ -86,18 +86,24 @@ CCAR_FOREGROUND_CMDS="node claude"     # pane_current_command must be one of the
 #       What do you want to do?
 #     ❯ 1. Stop and wait for limit to reset
 #       2. Upgrade your plan
-# While it's up it BLOCKS text entry, so the resume "continue" can't land. The
-# monitor watches for it on every poll and, the instant it appears, navigates to
-# option 1 ("Stop and wait") and confirms — no need to wait for the reset window.
-# Set CCAR_LIMIT_PROMPT_REGEX="" to disable this handling entirely.
-CCAR_LIMIT_PROMPT_REGEX="stop and wait for limit to reset"
-CCAR_LIMIT_PROMPT_NAV="Up Up"          # keys to land on option 1 (clamps at the top from the default selection)
-CCAR_LIMIT_PROMPT_CONFIRM="Enter"      # key to confirm the selection
+# While it's up it BLOCKS text entry, so a later resume "continue" can't land. The
+# monitor answers it the INSTANT it detects the menu (this runs on every poll),
+# NOT at the reset window. Because the menu WRAPS, a blind "Up Up" can leave the
+# cursor on the wrong option — so instead the monitor STEPS the selection and,
+# after each keypress, re-reads the pane to CONFIRM the marker (❯) is on the
+# "stop and wait" line before it presses Enter. If it can't get there within
+# CCAR_LIMIT_PROMPT_MAX_NAV steps it does NOT confirm (better than picking
+# "Upgrade"). Set CCAR_LIMIT_PROMPT_REGEX="" to disable this handling entirely.
+CCAR_LIMIT_PROMPT_REGEX="stop and wait for limit to reset"   # identifies the wait-option line
+CCAR_LIMIT_PROMPT_MARKER='^[[:space:]]*(❯|>)'   # regex (grep -E) for how the SELECTED menu line is marked
+CCAR_LIMIT_PROMPT_NAV_STEP="Up"        # one navigation keypress, sent between position checks
+CCAR_LIMIT_PROMPT_MAX_NAV=6            # give up WITHOUT confirming after this many steps (>= number of menu options)
+CCAR_LIMIT_PROMPT_CONFIRM="Enter"      # key to confirm once the marker is on the wait option
 # The live menu sits at the very bottom of the pane, so the prompt match is
 # anchored to the last N non-blank lines — and a fresh below-limit usage reading
 # vetoes it too. Both guards exist because the nav keys are the most dangerous
-# send (a stray Up+Enter in a normal input box resubmits recalled history), so a
-# conversation that merely QUOTES the menu text must not trigger them.
+# send (a stray Up into a normal input box recalls history), so a conversation
+# that merely QUOTES the menu text must not trigger them.
 CCAR_PROMPT_TAIL_LINES=15
 # Don't re-answer the same pane more than once per this many seconds: once the
 # prompt is dismissed the input box returns, and a stray Up+Enter there could

@@ -180,7 +180,12 @@ except Exception:
 PY
 }
 
-read_state_json() { # prints "used_percentage<TAB>resets_at<TAB>captured_at" (fields empty when absent)
+read_state_json() { # prints "used_percentage<US>resets_at<US>captured_at" (fields empty when absent)
+  # Fields are separated by US (ASCII 0x1f), NOT tab/space: the reader splits with
+  # IFS=$'\x1f', and because US is not an IFS-whitespace char an EMPTY middle field
+  # (e.g. resets_at=null) is preserved as its own field. With a tab/space
+  # separator bash would collapse the empty field and shift captured_at into
+  # resets, silently breaking the "clear" reading.
   python3 - "$CCAR_STATE_JSON" <<'PY'
 import json, sys
 used = resets = captured = ""
@@ -191,8 +196,39 @@ try:
     if d.get("captured_at") is not None: captured = str(int(d["captured_at"]))
 except Exception:
     pass
-print(used + "\t" + resets + "\t" + captured)
+print(used + "\x1f" + resets + "\x1f" + captured)
 PY
+}
+
+# state.json is (re)written by the status line only while a session is actively
+# rendering it; once everything pauses it stops changing. usage_state() runs on
+# EVERY poll and every wait iteration, and it used to shell out to python3 each
+# time just to parse this tiny file — thousands of interpreter startups across a
+# multi-hour idle wait. Each python3 (~30 MB RSS) bumps the WSL2 VM's memory
+# high-water mark, which the VM does not hand back to Windows, so the guest keeps
+# looking bloated long after the spawns are gone. We cache the parsed fields
+# keyed on the file's mtime: python3 runs only when the file actually changed
+# (i.e. a session is live and writing it), and NOT AT ALL while idle/paused. A
+# missing file needs no python at all. `stat` is a ~100 KB coreutils call —
+# orders of magnitude lighter than a python startup — so the steady-state idle
+# cost drops to one stat per poll.
+#
+# IMPORTANT: the cache lives in these globals and refresh_state_cache() must run
+# in the MAIN shell, not a subshell — scan_panes (its only caller) runs directly
+# in the loop, so the mtime it records persists across polls. usage_state() below
+# only READS these globals, so it stays safe to call inside $(...).
+state_cache_mtime="__unset__"
+state_used="" ; state_resets="" ; state_captured=""
+refresh_state_cache() { # updates state_used/state_resets/state_captured, re-parsing only when state.json changes
+  local mtime
+  mtime="$(stat -c %Y "$CCAR_STATE_JSON" 2>/dev/null)" || mtime=""
+  if [ -z "$mtime" ]; then
+    [ "$state_cache_mtime" = "" ] && return          # already reflects "no file"
+    state_cache_mtime="" ; state_used="" ; state_resets="" ; state_captured=""
+  elif [ "$mtime" != "$state_cache_mtime" ]; then
+    IFS=$'\x1f' read -r state_used state_resets state_captured < <(read_state_json)
+    state_cache_mtime="$mtime"
+  fi
 }
 
 # The status line's used_percentage, interpreted ONLY inside its validity window.
@@ -208,9 +244,8 @@ PY
 #             fresh; sessions were rendering the status line moments ago)
 #   unknown — anything else (missing file, unpatched status line, stale data):
 #             fall back to per-pane screen evidence alone
-usage_state() { # echoes limited | clear | unknown
-  local used resets captured now
-  IFS=$'\t' read -r used resets captured < <(read_state_json)
+usage_state() { # echoes limited | clear | unknown — reads the cache refreshed by scan_panes
+  local used="$state_used" resets="$state_resets" captured="$state_captured" now
   [ -n "$used" ] || { echo unknown; return; }
   now=$(now_epoch)
   if awk "BEGIN{exit !($used >= ${CCAR_LIMIT_PCT:-95})}" 2>/dev/null; then
@@ -329,7 +364,7 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
   local target="$1" mode="$2" now remaining mins step before after
   while :; do
     [ -e "$CANCEL_FILE" ] && return 1
-    scan_panes   # a pane hitting the limit mid-wait still gets latched + its choice prompt answered
+    scan_panes   # a pane hitting the limit mid-wait still gets latched + its choice prompt answered promptly
     reconcile_clock   # rate-limited; keeps a long wait honest if the clock drifts
     now=$(now_epoch)
     remaining=$((target - now))
@@ -414,35 +449,59 @@ unlatch_pane() { # $1 = paneref
   unset 'pane_latch[$p]' 'pane_snap[$p]' 'pane_snap_ok[$p]'
 }
 
+# Is the selection marker (❯) currently sitting on the "stop and wait" line?
+# We isolate the menu line that IS the wait option (matches CCAR_LIMIT_PROMPT_REGEX)
+# and check whether that exact line carries the marker. This is the ground truth
+# for "pressing Enter now picks 'stop and wait'", independent of how many options
+# the menu has or where the cursor happened to start.
+prompt_wait_selected() { # $1 = screen text; returns 0 if the wait-option line is the selected one
+  local line
+  line="$(printf '%s\n' "$1" | grep -E -i "$CCAR_LIMIT_PROMPT_REGEX" | tail -n1)"
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line" | grep -E -q "${CCAR_LIMIT_PROMPT_MARKER:-^[[:space:]]*(❯|>)}"
+}
+
 # Newer Claude Code interposes a CHOICE prompt the instant the limit is hit, ahead
 # of the normal pause screen:
 #       What do you want to do?
 #     ❯ 1. Stop and wait for limit to reset
 #       2. Upgrade your plan
 # While it's up it BLOCKS text entry, so a later resume "continue" can't land. We
-# pick option 1 ("Stop and wait") to fall through to the pause screen — and we do
-# it the moment we see it, NOT at reset time. A per-pane cooldown stops us from
-# re-sending nav keys into the input box that returns afterward, where a stray
-# Up+Enter could resubmit recalled history. The match is anchored to the BOTTOM
-# lines (the live menu sits at the very bottom of the pane) because the nav keys
-# are the most dangerous thing we send — a conversation that merely QUOTES the
-# menu text must not trigger them (the caller also vetoes when usage reads clear).
-dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 only if it answered
+# pick "Stop and wait" to fall through to the pause screen — the MOMENT we see the
+# menu, NOT at reset time (this runs on every scan, and scan runs every poll).
+#
+# The menu WRAPS, so a fixed "Up Up" is unreliable: if the cursor didn't start
+# where we assumed, wrapping can leave it on "Upgrade" and a blind Enter would
+# select the wrong thing. Instead we STEP the selection and, after each keypress,
+# re-read the pane to CONFIRM the marker (❯) landed on the wait line before we
+# ever press Enter. If we can't get there within CCAR_LIMIT_PROMPT_MAX_NAV steps
+# we do NOT confirm (better to leave the menu up for the next pass than to pick
+# "Upgrade"). Stepping one key at a time and verifying also makes a false trigger
+# safer than the old approach: on a screen that merely QUOTES the menu we send at
+# most a few Ups and NEVER an Enter. A per-pane cooldown (set before we act, so it
+# holds whether we confirmed or bailed) stops us from re-navigating the input box
+# that returns afterward, and the caller vetoes entirely when usage reads clear.
+dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 only if it confirmed
   [ -n "${CCAR_LIMIT_PROMPT_REGEX:-}" ] || return 1   # empty regex => feature disabled
-  local p="$1" pane tail now last
+  local p="$1" pane tail now last tries max
   tail="$(printf '%s\n' "$2" | grep -v '^[[:space:]]*$' | tail -n "${CCAR_PROMPT_TAIL_LINES:-15}")"
   [ -n "$tail" ] && printf '%s\n' "$tail" | grep -E -i -q "$CCAR_LIMIT_PROMPT_REGEX" || return 1
   now=$(now_epoch); last="${prompt_last_dismiss[$p]:-0}"
-  [ $((now - last)) -lt "${CCAR_PROMPT_COOLDOWN_SECONDS:-15}" ] && return 1  # answered it recently
-  prompt_last_dismiss[$p]=$now
+  [ $((now - last)) -lt "${CCAR_PROMPT_COOLDOWN_SECONDS:-15}" ] && return 1  # acted on it recently
+  prompt_last_dismiss[$p]=$now       # one attempt per cooldown, whether we confirm or bail
   pane="$(pr_pane "$p")"
-  if [ -n "${CCAR_LIMIT_PROMPT_NAV:-}" ]; then
-    # shellcheck disable=SC2086 — nav keys are intentionally word-split key names
-    txp "$p" send-keys -t "$pane" $CCAR_LIMIT_PROMPT_NAV
-    sleep 0.3   # let the menu redraw the selection before we confirm
-  fi
-  txp "$p" send-keys -t "$pane" "${CCAR_LIMIT_PROMPT_CONFIRM:-Enter}"
-  return 0
+  max="${CCAR_LIMIT_PROMPT_MAX_NAV:-6}"
+  for ((tries = 0; tries < max; tries++)); do
+    if prompt_wait_selected "$(capture "$p")"; then
+      txp "$p" send-keys -t "$pane" "${CCAR_LIMIT_PROMPT_CONFIRM:-Enter}"
+      return 0
+    fi
+    # shellcheck disable=SC2086 — nav step is an intentionally word-split key name
+    txp "$p" send-keys -t "$pane" ${CCAR_LIMIT_PROMPT_NAV_STEP:-Up}
+    sleep "${CCAR_LIMIT_PROMPT_NAV_PAUSE:-0.3}"   # let the menu redraw the new selection
+  done
+  log "rate-limit menu up but the marker never landed on 'stop and wait' in $max steps — not confirming this pass"
+  return 1
 }
 
 # One pass over every claude pane: answer choice prompts and update the latches.
@@ -455,6 +514,7 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
 # key injection while the account is demonstrably not limited.
 scan_panes() {
   local p scr ustate was
+  refresh_state_cache        # main-shell context, so the mtime cache persists across polls
   ustate="$(usage_state)"
   while IFS= read -r p; do
     [ -z "$p" ] && continue
