@@ -308,8 +308,12 @@ burn_bind_keys() { # idempotent per socket: prefix+KEY opens the command in a ne
   while IFS=$'\t' read -r socket session; do
     [ -n "$socket" ] || continue
     case "$burn_bound" in *"|$socket|"*) continue ;; esac
+    # -c is required: new-window otherwise inherits the SESSION's start directory,
+    # which is wherever the first `claude` of the day happened to run — an unrelated
+    # project repo would load its CLAUDE.md and file the transcript under it.
     if tmux -S "$socket" bind-key "${CCAR_BURN_KEY:-I}" \
-         new-window -n "${CCAR_BURN_WINDOW:-improve}" "${CCAR_BURN_CMD:-}" 2>/dev/null; then
+         new-window -c "${CCAR_BURN_CWD:-$HOME}" \
+         -n "${CCAR_BURN_WINDOW:-improve}" "${CCAR_BURN_CMD:-}" 2>/dev/null; then
       burn_bound="$burn_bound|$socket|"
       log "bound prefix+${CCAR_BURN_KEY:-I} on $socket"
     fi

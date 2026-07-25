@@ -167,7 +167,9 @@ CCAR_BURN_ENABLE=0                     # 1 to arm it
 CCAR_BURN_LEAD_MINUTES=75              # "soon" = this close to the reset
 CCAR_BURN_MAX_PCT=75                   # ...and only while usage is at or below this
 CCAR_BURN_KEY="I"                      # prefix + this key launches the command
-CCAR_BURN_WINDOW="improve"             # name of the tmux window it opens
+CCAR_BURN_WINDOW="improve"
+CCAR_BURN_CWD="$HOME"                   # working dir for that window; pin it so the run never
+                                       # inherits an unrelated project repo             # name of the tmux window it opens
 CCAR_BURN_LABEL="♻ improve"            # status-right hint while the window is open
 # Runs in a fresh tmux window, interactively, so you can watch and steer it.
 # Example (routes through cc-run so the new pane also gets auto-resume):
