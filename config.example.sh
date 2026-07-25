@@ -153,3 +153,23 @@ CCAR_CANCEL_KEY="X"
 
 # --- logging -----------------------------------------------------------------
 CCAR_LOG="$CCAR_STATE_DIR/monitor.log"
+
+# --- burn window (opt-in, off by default) -------------------------------------
+# The inverse of a rate limit: the 5h window resets SOON and quota is still
+# unspent. That quota expires at the reset, so it is the cheapest moment to run
+# something expensive you would otherwise put off. When the monitor sees the
+# window open it paints a status-right hint and posts a one-time tmux message;
+# pressing YOUR tmux prefix then CCAR_BURN_KEY opens CCAR_BURN_CMD in a new
+# window. Reuses the state the limit detector already reads — no extra polling.
+#
+# Leave CCAR_BURN_CMD empty (the default) and the whole feature stays inert.
+CCAR_BURN_ENABLE=0                     # 1 to arm it
+CCAR_BURN_LEAD_MINUTES=75              # "soon" = this close to the reset
+CCAR_BURN_MAX_PCT=75                   # ...and only while usage is at or below this
+CCAR_BURN_KEY="I"                      # prefix + this key launches the command
+CCAR_BURN_WINDOW="improve"             # name of the tmux window it opens
+CCAR_BURN_LABEL="♻ improve"            # status-right hint while the window is open
+# Runs in a fresh tmux window, interactively, so you can watch and steer it.
+# Example (routes through cc-run so the new pane also gets auto-resume):
+#   CCAR_BURN_CMD="$HOME/claude-autoresume/bin/cc-run --model opus --effort xhigh '/self-improve'"
+CCAR_BURN_CMD=""

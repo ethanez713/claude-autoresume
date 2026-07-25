@@ -261,6 +261,101 @@ usage_state() { # echoes limited | clear | unknown — reads the cache refreshed
   fi
 }
 
+# --- burn window (opt-in) ----------------------------------------------------
+# The inverse of a rate limit: the window resets SOON and quota is still unspent.
+# That quota expires at the reset, so it is the cheapest moment to run something
+# expensive. Reuses the state cache the limit detector already maintains — no
+# extra polling, no network. Off unless CCAR_BURN_CMD is set.
+#
+# Deliberately kept off the status_set/status_clear path: those own status-right
+# for the resume countdown and toggle status_active, which the main loop treats
+# as "a countdown is painted". Sharing them would make the two fight every poll.
+burn_bound=""   # sockets whose launch key is already bound
+burn_open=0     # 1 while we have flagged the current window as open
+burn_swept=0    # 0 until we have cleared any label a PREVIOUS monitor left painted
+
+burn_enabled() { [ "${CCAR_BURN_ENABLE:-0}" = 1 ] && [ -n "${CCAR_BURN_CMD:-}" ]; }
+
+burn_status_set() { # $1 = text; sets status-right WITHOUT claiming status_active
+  local socket session
+  while IFS=$'\t' read -r socket session; do
+    [ -n "$socket" ] && tmux -S "$socket" set-option -t "$session" status-right "$1" 2>/dev/null
+  done < <(live_sessions)
+}
+burn_status_clear() {
+  local socket session
+  while IFS=$'\t' read -r socket session; do
+    [ -n "$socket" ] && tmux -S "$socket" set-option -u -t "$session" status-right 2>/dev/null
+  done < <(live_sessions)
+}
+
+burn_window_open() { # 0 = open
+  local used="$state_used" resets="$state_resets" captured="$state_captured" now mins
+  [ -n "$used" ] && [ -n "$resets" ] && [ -n "$captured" ] || return 1
+  now=$(now_epoch)
+  # A stale usage figure must never read as "quota to spare" — same reasoning as
+  # usage_state(): the status line stops writing when sessions go idle.
+  [ $((now - captured)) -le "${CCAR_USAGE_FRESH_SECONDS:-600}" ] || return 1
+  [ "$now" -lt "$resets" ] || return 1
+  mins=$(( (resets - now) / 60 ))
+  [ "$mins" -le "${CCAR_BURN_LEAD_MINUTES:-75}" ] || return 1
+  awk "BEGIN{exit !($used <= ${CCAR_BURN_MAX_PCT:-75})}" 2>/dev/null || return 1
+  return 0
+}
+
+burn_bind_keys() { # idempotent per socket: prefix+KEY opens the command in a new window
+  local socket session
+  while IFS=$'\t' read -r socket session; do
+    [ -n "$socket" ] || continue
+    case "$burn_bound" in *"|$socket|"*) continue ;; esac
+    if tmux -S "$socket" bind-key "${CCAR_BURN_KEY:-I}" \
+         new-window -n "${CCAR_BURN_WINDOW:-improve}" "${CCAR_BURN_CMD:-}" 2>/dev/null; then
+      burn_bound="$burn_bound|$socket|"
+      log "bound prefix+${CCAR_BURN_KEY:-I} on $socket"
+    fi
+  done < <(live_sessions)
+}
+
+burn_check() { # called once per idle poll; must never disturb the resume path
+  burn_enabled || return 0
+  [ "${#pane_latch[@]}" -eq 0 ] || return 0   # a real limit outranks an opportunity
+  [ "$status_active" -eq 0 ] || return 0      # countdown owns status-right
+  burn_bind_keys
+  if burn_window_open; then
+    local mins; mins=$(( (state_resets - $(now_epoch)) / 60 ))
+    if [ "$burn_open" -eq 0 ]; then
+      burn_open=1
+      local socket session
+      while IFS=$'\t' read -r socket session; do
+        [ -n "$socket" ] && tmux -S "$socket" display-message -t "$session" \
+          "${CCAR_BURN_LABEL:-♻ improve} — ~${mins}m to reset, ${state_used}% used. prefix+${CCAR_BURN_KEY:-I} to start" 2>/dev/null
+      done < <(live_sessions)
+      log "burn window OPEN (${mins}m to reset, ${state_used}% used) — nudged live sessions"
+    fi
+    burn_status_set "${CCAR_BURN_LABEL:-♻ improve} prefix+${CCAR_BURN_KEY:-I} "
+  elif [ "$burn_open" -eq 1 ]; then
+    burn_open=0
+    burn_status_clear
+    log "burn window closed"
+  elif [ "$burn_swept" -eq 0 ]; then
+    # First closed pass of this process. A monitor that was restarted while the
+    # window was open (or killed mid-window) leaves our label painted with no
+    # in-process transition left to clear it, so sweep it once — but only if the
+    # text is still ours, never a countdown someone else owns.
+    burn_swept=1
+    local socket session cur
+    while IFS=$'\t' read -r socket session; do
+      [ -n "$socket" ] || continue
+      cur="$(tmux -S "$socket" show-options -qv -t "$session" status-right 2>/dev/null)"
+      case "$cur" in
+        "${CCAR_BURN_LABEL:-♻ improve}"*)
+          tmux -S "$socket" set-option -u -t "$session" status-right 2>/dev/null
+          log "cleared a stale burn label left by a previous monitor" ;;
+      esac
+    done < <(live_sessions)
+  fi
+}
+
 parse_screen_time() { # $1: pane text, $2: true-now epoch; prints next-future epoch or nothing
   # Fallback only — used when the status line gave us no resets_at epoch. The
   # message is like "resets 4am (America/New_York)"; if a tz name is present we
@@ -672,5 +767,6 @@ while :; do
     status_clear
     log "no active limit but a countdown was still shown — cleared it"
   fi
+  burn_check
   sleep "$CCAR_POLL_SECONDS"
 done
