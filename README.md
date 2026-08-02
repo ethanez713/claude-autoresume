@@ -105,6 +105,30 @@ tmux -L ccar ls                       # list the fallback session + windows
 tmux -L ccar kill-session -t cc       # end the fallback session
 ```
 
+### Remote-control watchdog (opt-in)
+
+Claude Code's **Remote Control** already recovers from the disconnects you'd
+expect, and this repo does not duplicate any of it — turn on *"Enable Remote
+Control for all sessions"* (`/config`, or `"remoteControlAtStartup": true`) and
+every session connects itself, including panes the monitor resumes; the bridge
+also rebuilds its own transport after a laptop sleep or a network blip.
+
+What none of that covers is the state *after* Claude Code's internal recovery is
+exhausted: the `/rc active` indicator vanishes from the footer and its own advice
+is to run `/remote-control` again by hand — which nobody does at 3am. Set
+`CCAR_RC_ENABLE=1` and the monitor re-types that command for you, and nothing
+else. It only ever types into a pane it can prove is idle: an input box that is
+present and **empty**, a screen byte-identical two seconds apart (a session
+mid-turn repaints its timer every second), no rate-limit UI, and no rate limit
+latched. Attempts back off per pane (1, 2, 4, 8, 16, 30, 60 minutes, then hold),
+and any sighting of the indicator resets that. Panes too narrow to fit the
+indicator are skipped rather than guessed about, since Claude Code hides it there.
+
+```bash
+tests/rc_watchdog_test.sh   # screen-reading helpers, no tmux
+tests/rc_watchdog_e2e.sh    # rc_check driven against scratch tmux panes
+```
+
 ### Rendering
 
 Claude's TUI garbles on scroll inside tmux if the terminal advertises xterm caps,

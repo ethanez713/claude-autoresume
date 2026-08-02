@@ -167,11 +167,50 @@ CCAR_BURN_ENABLE=0                     # 1 to arm it
 CCAR_BURN_LEAD_MINUTES=75              # "soon" = this close to the reset
 CCAR_BURN_MAX_PCT=75                   # ...and only while usage is at or below this
 CCAR_BURN_KEY="I"                      # prefix + this key launches the command
-CCAR_BURN_WINDOW="improve"
-CCAR_BURN_CWD="$HOME"                   # working dir for that window; pin it so the run never
-                                       # inherits an unrelated project repo             # name of the tmux window it opens
+CCAR_BURN_WINDOW="improve"             # name of the tmux window it opens
+CCAR_BURN_CWD="$HOME"                  # working dir for that window; pin it so the run
+                                       # never inherits an unrelated project repo
 CCAR_BURN_LABEL="♻ improve"            # status-right hint while the window is open
 # Runs in a fresh tmux window, interactively, so you can watch and steer it.
 # Example (routes through cc-run so the new pane also gets auto-resume):
 #   CCAR_BURN_CMD="$HOME/claude-autoresume/bin/cc-run --model opus --effort xhigh '/self-improve'"
 CCAR_BURN_CMD=""
+
+# --- remote-control watchdog (opt-in, off by default) -------------------------
+# Claude Code's Remote Control already reconnects itself in the cases you'd
+# expect, and this watchdog is NOT a replacement for any of it:
+#   * turn on "Enable Remote Control for all sessions" (`/config`, or
+#     "remoteControlAtStartup": true in ~/.claude/settings.json) and every new
+#     session connects on its own — including panes this monitor resumes;
+#   * the bridge rebuilds its own transport after a laptop sleep or a network
+#     blip, retrying internally before it gives up.
+# The one state neither covers is AFTER that internal recovery is exhausted: the
+# "/rc active" indicator vanishes from the footer and Claude Code's own advice is
+# to run /remote-control again by hand — which nobody does at 3am. This re-types
+# that command for you, and nothing else.
+#
+# It only ever types into a pane that is demonstrably idle: an input box that is
+# present and EMPTY, a screen byte-identical CCAR_SETTLE_SECONDS apart (a session
+# mid-turn repaints its timer every second), no rate-limit UI on screen, and no
+# rate limit latched. If the pane's completion popup swallows the Enter, it
+# presses Enter once more — and if the box ends up holding anything other than
+# the command it typed, it clears the box and gives up on that attempt.
+CCAR_RC_ENABLE=0                       # 1 to arm it
+CCAR_RC_COMMAND="/remote-control"      # the long form: less ambiguous than /rc to fuzzy completion
+# The footer indicator. Claude Code paints "/rc active" while the bridge is up,
+# and truncates it to a bare "/rc" when the pane is too narrow for the word.
+CCAR_RC_INDICATOR_REGEX='(^|[[:space:]])/rc([[:space:]]|$)'
+# The input line's prompt marker, with anything the line holds after it. Used
+# both to prove the box is empty before typing and to read back what landed in it.
+CCAR_RC_PROMPT_REGEX='^[[:space:]]*(❯|>)[[:space:]]*'
+CCAR_RC_TAIL_LINES=8                   # bottom chrome to search (input box, separator, status, mode line)
+# Claude Code HIDES the indicator entirely on a pane too narrow to fit it, so a
+# narrow pane can't distinguish "disconnected" from "no room" — those are skipped.
+CCAR_RC_MIN_WIDTH=80
+CCAR_RC_CHECK_SECONDS=30               # how often to look (the main poll is far faster than this needs)
+CCAR_RC_GRACE_SECONDS=120              # indicator must stay missing this long — Claude Code's own reconnect goes first
+CCAR_RC_BUSY_RETRY_SECONDS=60          # retry gap when a reconnect was due but the pane wasn't idle (doesn't consume a backoff step)
+# Exponential backoff between reconnect attempts, in minutes; holds at the last
+# value forever rather than giving up, so a session that was offline for hours
+# still recovers on the first poll after the network returns.
+CCAR_RC_BACKOFF_MINUTES="1 2 4 8 16 30 60"

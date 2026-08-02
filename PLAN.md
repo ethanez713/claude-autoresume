@@ -258,6 +258,50 @@ checklist-below-the-message resume (the live failure), fresh-usage FP veto (text
 idle-pane non-injection, choice-prompt answer. The real pause message is
 `You've hit your session limit · resets 4am (America/New_York)`.
 
+## 8a. Remote-control watchdog (opt-in, `CCAR_RC_ENABLE`)
+
+**Deliberately scoped to what Claude Code does NOT do for itself.** Two of its
+built-ins already cover the obvious cases and are not reimplemented here:
+`remoteControlAtStartup` connects every new session (including panes resumed by
+§4), and the bridge rebuilds its own transport after a sleep or a network blip.
+The residue is the state *after* that internal recovery is exhausted — the
+`/rc active` footer indicator disappears and the documented remedy is to run
+`/remote-control` again **by hand**. That manual step is all this automates.
+
+Read-only evidence, per pane, once every `CCAR_RC_CHECK_SECONDS`:
+
+- **indicator** — `CCAR_RC_INDICATOR_REGEX` against the chrome *below* the input
+  box only (`rc_footer`), so a conversation that merely mentions `/rc` can't read
+  as "still connected" and silently disable the watchdog. Matches both the full
+  `/rc active` and the bare `/rc` that Claude Code truncates to on narrower panes.
+- **width** — panes under `CCAR_RC_MIN_WIDTH` are skipped: Claude Code *hides*
+  the indicator when it doesn't fit, so absence there means nothing.
+- **grace** — the indicator must stay missing `CCAR_RC_GRACE_SECONDS` first, so
+  Claude Code's own recovery always gets to win the race.
+- **idle** — an input box present and **empty** (`rc_input_ready`; note Claude
+  Code pads an empty input line with U+00A0, which `[[:space:]]` does not match —
+  `rc_tail` normalises it), plus a screen byte-identical `CCAR_SETTLE_SECONDS`
+  apart. A session mid-turn repaints its elapsed-time counter every second, so a
+  settled screen is the proof that nothing is running and nothing is half-typed.
+  Not idle ⇒ retry in `CCAR_RC_BUSY_RETRY_SECONDS` **without** consuming a
+  backoff step.
+- **no rate-limit UI** — `rc_check` returns early while anything is latched, and
+  re-checks the pause message/choice menu to close the one-poll race.
+
+The send types the command, presses Enter, then **reads the input box back**:
+a slash command opens Claude Code's completion popup where the first Enter
+accepts a completion instead of submitting, so a second Enter goes only if what's
+sitting there is still a prefix of our own command (`rc_residue_is_ours`).
+Anything else is cleared and abandoned — the pane is never left holding a
+half-typed or mis-completed command. Failures back off per pane
+(`CCAR_RC_BACKOFF_MINUTES`, holding at the longest interval rather than giving
+up); any sighting of the indicator resets the episode.
+
+Tests: `tests/rc_watchdog_test.sh` (helpers, no tmux) and
+`tests/rc_watchdog_e2e.sh` (drives `rc_check` against scratch tmux panes painted
+with connected / disconnected / repainting footers; asserts the connected and
+repainting panes are never typed into).
+
 ## 9. Open
 
 - **Confirm the resume keystrokes at a real limit.** Detection and multi-session

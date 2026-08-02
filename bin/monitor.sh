@@ -360,6 +360,225 @@ burn_check() { # called once per idle poll; must never disturb the resume path
   fi
 }
 
+# --- remote-control watchdog (opt-in, best effort) ---------------------------
+# Claude Code already handles the common disconnects ITSELF, and we deliberately
+# do not duplicate that:
+#   * `remoteControlAtStartup` (settings.json / `/config` -> "Enable Remote
+#     Control for all sessions") reconnects every new session, including the ones
+#     cc-run starts and the ones this monitor resumes.
+#   * The bridge rebuilds its own transport after a laptop sleep or a network
+#     blip, retrying internally before it gives up.
+# What it does NOT do is come back after that internal recovery is EXHAUSTED:
+# the footer indicator disappears and Claude Code's own advice is "run
+# /remote-control again to retry" — a manual step, which is exactly the state an
+# unattended session gets stuck in overnight. This watchdog performs only that
+# last step, and only when it is confident the pane is idle.
+#
+# Evidence, all of it read-only, per pane:
+#   indicator — the footer carries "/rc active" (or a bare "/rc" when the pane is
+#               too narrow to fit the word) while the bridge is up. Missing =
+#               not connected. Claude Code hides the indicator entirely on very
+#               narrow panes, so panes below CCAR_RC_MIN_WIDTH are skipped rather
+#               than guessed about.
+#   grace     — the indicator must stay missing for CCAR_RC_GRACE_SECONDS before
+#               we touch anything, so Claude Code's own reconnect wins the race.
+#   idle      — an input box that is PRESENT and EMPTY, and a screen that is
+#               byte-identical CCAR_SETTLE_SECONDS apart. A session mid-turn
+#               repaints its elapsed-time counter every second, so a settled
+#               screen means nothing is running and nothing is half-typed.
+# Then a per-pane exponential backoff (CCAR_RC_BACKOFF_MINUTES) spaces the
+# retries, and any sighting of the indicator resets it.
+declare -A rc_missing_since=()   # paneref -> epoch the indicator first went missing
+declare -A rc_next_attempt=()    # paneref -> epoch we may next send the command
+declare -A rc_attempts=()        # paneref -> retries already sent this episode
+rc_last_check=0
+
+rc_enabled() { [ "${CCAR_RC_ENABLE:-0}" = 1 ] && [ -n "${CCAR_RC_COMMAND:-}" ]; }
+
+# The bottom chrome of the pane: input box, separator, status line, mode line.
+# Claude Code pads its EMPTY input line with U+00A0 (non-breaking space), which
+# [[:space:]] does not match — so without this normalisation an idle prompt reads
+# as "the box has text in it" and the watchdog would never fire. Rewriting the
+# two-byte sequence to a plain space up front lets every helper below use
+# ordinary whitespace classes. (tr can't do this: 0xC2 and 0xA0 are also bytes of
+# other UTF-8 characters on these lines, e.g. "·", and deleting them corrupts.)
+rc_tail() { # $1 = screen text
+  printf '%s\n' "$1" | sed 's/\xc2\xa0/ /g' | grep -v '^[[:space:]]*$' \
+    | tail -n "${CCAR_RC_TAIL_LINES:-8}"
+}
+
+# Just the chrome BELOW the input box — separator, status line, mode line. That is
+# where the indicator is painted, and restricting the search to it keeps a
+# CONVERSATION that happens to mention /rc from reading as "still connected"
+# (which would silently disable the watchdog for that pane). Falls back to the
+# whole tail when there is no input box to anchor on; we never act on that state
+# anyway, since rc_input_ready requires the box.
+rc_footer() { # $1 = screen text
+  local t n
+  t="$(rc_tail "$1")"
+  n="$(printf '%s\n' "$t" | grep -n -E "${CCAR_RC_PROMPT_REGEX}" | tail -n1 | cut -d: -f1)"
+  if [ -n "$n" ]; then printf '%s\n' "$t" | tail -n +$((n + 1)); else printf '%s\n' "$t"; fi
+}
+
+rc_indicator_present() { # $1 = screen text
+  rc_footer "$1" | grep -E -q "${CCAR_RC_INDICATOR_REGEX}"
+}
+
+# The input line as Claude Code paints it when idle: the prompt marker and
+# nothing after it. Returns 1 when there is no input box at all (a modal/menu is
+# up, or the pane is showing something else entirely) as well as when the box
+# holds text — both mean "don't type here".
+rc_input_ready() { # $1 = screen text
+  local line rest
+  line="$(rc_tail "$1" | grep -E "${CCAR_RC_PROMPT_REGEX}" | tail -n1)"
+  [ -n "$line" ] || return 1
+  rest="$(printf '%s' "$line" | sed -E "s/${CCAR_RC_PROMPT_REGEX}//" | tr -d '[:space:]')"
+  [ -z "$rest" ]
+}
+
+# Whatever currently sits in the input box (empty string when idle or absent).
+rc_input_text() { # $1 = screen text
+  rc_tail "$1" | grep -E "${CCAR_RC_PROMPT_REGEX}" | tail -n1 \
+    | sed -E "s/${CCAR_RC_PROMPT_REGEX}//" | sed -E 's/[[:space:]]+$//'
+}
+
+# Is what's sitting in the input box our own command (whole or partially
+# completed), rather than something else the pane put there? Only then is it safe
+# to press Enter on it.
+rc_residue_is_ours() { # $1 = text left in the box, $2 = the command we typed
+  [ -n "$1" ] || return 1
+  case "$2" in "$1"*) return 0 ;; *) return 1 ;; esac
+}
+
+rc_backoff_minutes() { # $1 = 1-based attempt number; echoes minutes to wait before the next try
+  local i=0 m last=60
+  for m in ${CCAR_RC_BACKOFF_MINUTES:-1 2 4 8 16 30 60}; do
+    i=$((i + 1)); last="$m"
+    [ "$i" -eq "$1" ] && { printf '%s' "$m"; return; }
+  done
+  printf '%s' "$last"   # hold at the longest interval rather than giving up
+}
+
+# Type the reconnect command into an idle pane. Returns 0 only if it was
+# submitted. Slash commands open Claude Code's completion popup, where the first
+# Enter ACCEPTS the highlighted completion instead of submitting the line — so we
+# read the input box back and only press Enter a second time when what is sitting
+# there is still our own command. Anything else is cleared and abandoned: the
+# pane must never be left holding a half-typed or mis-completed command.
+rc_send() { # $1 = paneref
+  local p="$1" pane cmd left
+  pane="$(pr_pane "$p")"
+  cmd="${CCAR_RC_COMMAND:-/remote-control}"
+  if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
+    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
+    sleep 0.3
+  fi
+  txp "$p" send-keys -t "$pane" -l "$cmd"
+  sleep 0.5   # let the TUI ingest the text (and open its completion popup)
+  txp "$p" send-keys -t "$pane" Enter
+  sleep 0.8
+  left="$(rc_input_text "$(capture "$p")")"
+  if [ -n "$left" ]; then
+    if rc_residue_is_ours "$left" "$cmd"; then
+      txp "$p" send-keys -t "$pane" Enter   # the popup ate the first Enter as a completion
+      sleep 0.5
+    else
+      if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
+        # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+        txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
+      fi
+      log "rc: input box held unexpected text after typing the reconnect command — cleared it, not submitting"
+      return 1
+    fi
+  fi
+  left="$(rc_input_text "$(capture "$p")")"
+  if [ -n "$left" ] && [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
+    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR   # never leave residue behind
+  fi
+  return 0
+}
+
+rc_forget() { # $1 = paneref
+  unset 'rc_missing_since[$1]' 'rc_next_attempt[$1]' 'rc_attempts[$1]'
+}
+
+rc_check() { # called once per idle poll; must never disturb the resume path
+  rc_enabled || return 0
+  [ "${#pane_latch[@]}" -eq 0 ] || return 0    # a real rate limit outranks this
+  local now; now=$(now_epoch)
+  [ $((now - rc_last_check)) -ge "${CCAR_RC_CHECK_SECONDS:-30}" ] || return 0
+  rc_last_check=$now
+
+  local p scr seen="" width since idx mins
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    seen="$seen|$p|"
+    # Claude Code hides the indicator on a pane too narrow to fit it, so a narrow
+    # pane tells us nothing — never act on that ambiguity.
+    width="$(txp "$p" display-message -p -t "$(pr_pane "$p")" '#{pane_width}' 2>/dev/null)"
+    case "$width" in ''|*[!0-9]*) continue ;; esac
+    [ "$width" -ge "${CCAR_RC_MIN_WIDTH:-80}" ] || continue
+
+    scr="$(capture "$p")"
+    if rc_indicator_present "$scr"; then
+      if [ -n "${rc_missing_since[$p]:-}" ]; then
+        since="${rc_missing_since[$p]}"
+        log "rc: remote control is connected again after $((now - since))s (${rc_attempts[$p]:-0} reconnect attempt(s)) — backoff reset"
+      fi
+      rc_forget "$p"
+      continue
+    fi
+
+    # Indicator gone. Let Claude Code's own transport recovery have the first go.
+    if [ -z "${rc_missing_since[$p]:-}" ]; then
+      rc_missing_since[$p]=$now
+      rc_next_attempt[$p]=$((now + ${CCAR_RC_GRACE_SECONDS:-120}))
+      rc_attempts[$p]=0
+      log "rc: remote control indicator missing on a pane — waiting ${CCAR_RC_GRACE_SECONDS:-120}s for Claude Code's own reconnect"
+      continue
+    fi
+    [ "$now" -ge "${rc_next_attempt[$p]:-0}" ] || continue
+
+    # Belt-and-suspenders: never type into a pane that is showing rate-limit UI.
+    # scan_panes latches those within a poll, but this closes the race.
+    if screen_shows_limit "$scr" || \
+       { [ -n "${CCAR_LIMIT_PROMPT_REGEX:-}" ] && \
+         rc_tail "$scr" | grep -E -i -q "$CCAR_LIMIT_PROMPT_REGEX"; }; then
+      rc_next_attempt[$p]=$((now + ${CCAR_RC_BUSY_RETRY_SECONDS:-60}))
+      continue
+    fi
+    # An empty input box and a screen that isn't repainting: the session is idle,
+    # not mid-turn, and nothing is half-typed that our keys could ride along with.
+    if ! rc_input_ready "$scr" ; then
+      rc_next_attempt[$p]=$((now + ${CCAR_RC_BUSY_RETRY_SECONDS:-60}))
+      log "rc: reconnect due but the pane's input box is busy or absent — retrying in ${CCAR_RC_BUSY_RETRY_SECONDS:-60}s"
+      continue
+    fi
+    sleep "${CCAR_SETTLE_SECONDS:-2}"
+    if [ "$(hash_of "$(capture "$p")")" != "$(hash_of "$scr")" ]; then
+      rc_next_attempt[$p]=$((now + ${CCAR_RC_BUSY_RETRY_SECONDS:-60}))
+      log "rc: reconnect due but the pane is still repainting (work in progress) — retrying in ${CCAR_RC_BUSY_RETRY_SECONDS:-60}s"
+      continue
+    fi
+
+    since="${rc_missing_since[$p]}"
+    idx=$(( ${rc_attempts[$p]:-0} + 1 ))
+    if rc_send "$p"; then
+      rc_attempts[$p]=$idx
+      log "rc: indicator missing for $((now - since))s — sent ${CCAR_RC_COMMAND} (attempt $idx)"
+    fi
+    mins="$(rc_backoff_minutes "$idx")"
+    rc_next_attempt[$p]=$((now + mins * 60))
+  done < <(claude_panes)
+
+  # Drop state for panes that are gone (closed, or no longer running claude).
+  for p in "${!rc_missing_since[@]}"; do
+    case "$seen" in *"|$p|"*) ;; *) rc_forget "$p" ;; esac
+  done
+}
+
 parse_screen_time() { # $1: pane text, $2: true-now epoch; prints next-future epoch or nothing
   # Fallback only — used when the status line gave us no resets_at epoch. The
   # message is like "resets 4am (America/New_York)"; if a tz name is present we
@@ -772,5 +991,6 @@ while :; do
     log "no active limit but a countdown was still shown — cleared it"
   fi
   burn_check
+  rc_check
   sleep "$CCAR_POLL_SECONDS"
 done
