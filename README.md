@@ -145,6 +145,37 @@ to the outer terminal tab via `set-titles on` / `set-titles-string '#T'` — tmu
 otherwise swallows the app's OSC title into the pane title. (If Windows Terminal
 doesn't update, check the profile's "Suppress title changes" isn't enabled.)
 
+### Working-vs-idle glyph
+
+Claude Code emits the same title glyph (`✳`) whether a session is parked at the
+prompt or burning tokens, so a window list of several sessions can't tell you
+which ones are actually running. The monitor closes that gap: on every poll it
+checks each watched pane for the spinner line Claude paints while a turn is in
+flight (`CCAR_BUSY_REGEX`) and publishes the answer as the tmux window option
+`@ccar_busy`. It also patches `window-status-format` so a *leading* `✳` renders
+as `●` on windows where that option is `1`:
+
+```
+1:● adbconnect          <- running
+2:✳ rotblock            <- idle at the prompt
+```
+
+The rewrite is anchored, so any other glyph Claude puts in the title — the moon
+phases it ticks while a subagent runs — passes through untouched, which keeps a
+dispatched subagent distinguishable from a plain in-session turn.
+
+The format is patched on whichever tmux server your panes live on (yours as
+often as the `ccar` fallback), which is why it isn't shipped in this repo's
+`tmux.conf`. The monitor rewrites only the `#W` / `#{window_name}` already in
+your format rather than overwriting the option, so any customisation survives;
+if your format names no window at all it logs a line and leaves it alone.
+`CCAR_BUSY_NAME_FORMAT` controls what the name renders as.
+
+Detection costs nothing extra — it reads the pane capture the limit scan already
+takes — and a transition forces a `refresh-client -S` so the bar repaints
+immediately instead of at the next `status-interval`. Set `CCAR_BUSY_REGEX=""`
+to switch the whole thing off.
+
 ## Security
 
 No network calls outside `claude`→Anthropic. No deps beyond bash + tmux + python

@@ -37,6 +37,21 @@ CCAR_STATE_JSON="$CCAR_STATE_DIR/state.json"
 # local render of rate_limits.five_hour.resets_at (the authoritative signal).
 CCAR_DETECT_REGEX="(hit your (session|usage) limit|usage limit reached|session limit.*reset)"
 CCAR_POLL_SECONDS=5                    # how often to poll while watching
+# Matched (grep -E) against a claude pane to decide "a turn is running right now",
+# published to tmux as the window option @ccar_busy so the window list can show a
+# working session differently from a parked one. Claude's TUI paints a spinner
+# line at column 1 above the input box while it works — the glyph cycles
+# (✻ ✽ ✢ ✶ ✳ ✺ ✷ * ·) and the text does too ("Processing…", "Beboppin'…",
+# "Waiting for 1 background agent to finish"), so we key on the column-1 glyph
+# rather than the wording. Set empty to switch the indicator off.
+CCAR_BUSY_REGEX='(^[✻✽✢✶✳✺✷*·][[:space:]]|esc to interrupt)'
+# What the window name renders as once @ccar_busy is set. Claude Code emits the
+# same title glyph (✳) idle or working, so we rewrite a LEADING ✳ to ● — the
+# anchor means any other glyph it puts there (the moon phases it ticks while a
+# subagent runs) passes through untouched, keeping dispatch distinguishable from
+# a plain in-session turn. The monitor splices this into window-status-format on
+# whichever tmux server your panes live on.
+CCAR_BUSY_NAME_FORMAT='#{?#{==:#{@ccar_busy},1},#{s|^✳|●|:#{window_name}},#{window_name}}'
 # The account is treated as rate-limited when the status line's five-hour
 # used_percentage (in state.json) is at/above this — but only while the reading
 # is inside its validity window (see CCAR_USAGE_FRESH_SECONDS). A valid reading

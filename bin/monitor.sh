@@ -46,6 +46,8 @@ declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate
 declare -A pane_latch=()
 declare -A pane_snap=()
 declare -A pane_snap_ok=()
+declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
+declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its window-status format
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
 # --- clock reconciliation ----------------------------------------------------
@@ -146,6 +148,56 @@ status_clear() {
 capture() { txp "$1" capture-pane -p -t "$(pr_pane "$1")" 2>/dev/null; }  # $1 = paneref
 
 hash_of() { printf '%s' "$1" | sha1sum | cut -d' ' -f1; }  # $1 = screen text
+
+# Claude Code paints the SAME title glyph (✳) whether it is idle or working, so
+# the tmux window name alone cannot tell a burning session from a parked one.
+# What does differ is its TUI: while a turn is running it paints a spinner line
+# at column 1 above the input box. We publish that as a per-window user option
+# and swap the glyph in window-status-format — the pane title keeps flowing
+# through untouched, so Claude's own subagent-dispatch moon phases still win.
+screen_shows_working() { # $1 = screen text
+  [ -n "${CCAR_BUSY_REGEX:-}" ] || return 1   # empty regex => feature off, NOT "grep matches everything"
+  [ -n "$1" ] && printf '%s\n' "$1" | grep -E -q "$CCAR_BUSY_REGEX"
+}
+
+# The glyph swap has to live on whichever tmux server the operator actually
+# attached to, which is theirs as often as it is the ccar fallback — so we patch
+# window-status-format in place rather than shipping it in tmux.conf. Rewriting
+# the #W already in the format (instead of overwriting the whole option) keeps
+# any customisation the operator has, and works whatever this tmux's stock
+# format happens to be.
+install_busy_format() {
+  [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
+  local socket session key opt cur new
+  while IFS=$'\t' read -r socket session; do
+    key="$socket"$'\t'"$session"
+    [ -n "${busy_format_done[$key]:-}" ] && continue
+    busy_format_done[$key]=1
+    for opt in window-status-format window-status-current-format; do
+      cur="$(tmux -S "$socket" show-options -gv "$opt" 2>/dev/null)" || continue
+      case "$cur" in
+        *@ccar_busy*) continue ;;
+        *'#W'*)               new="${cur//'#W'/$CCAR_BUSY_NAME_FORMAT}" ;;
+        *'#{window_name}'*)   new="${cur//'#{window_name}'/$CCAR_BUSY_NAME_FORMAT}" ;;
+        *) log "$opt on $socket names no window — leaving it alone; the working glyph will not show there"; continue ;;
+      esac
+      tmux -S "$socket" set-option -g "$opt" "$new" 2>/dev/null
+    done
+  done < <(live_sessions)
+}
+
+publish_busy() { # $1 = paneref, $2 = its captured screen
+  [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
+  local busy=0
+  screen_shows_working "$2" && busy=1
+  # Re-set every poll rather than only on a change: the option lives on the
+  # window, so moving/splitting/renumbering panes can strand a stale value that
+  # a change-gated writer would never correct.
+  txp "$1" set-option -w -t "$(pr_pane "$1")" @ccar_busy "$busy" 2>/dev/null
+  [ "${pane_busy[$1]:-}" = "$busy" ] && return 0
+  pane_busy[$1]="$busy"
+  txp "$1" refresh-client -S 2>/dev/null   # repaint now instead of at the next status-interval
+}
 
 screen_shows_limit() { # $1 = screen text: pause message anywhere on the visible screen
   [ -n "$1" ] && printf '%s\n' "$1" | grep -E -i -q "$CCAR_DETECT_REGEX"
@@ -837,6 +889,7 @@ scan_panes() {
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     scr="$(capture "$p")"
+    publish_busy "$p" "$scr"
     if [ "$ustate" != clear ] && dismiss_limit_prompt "$p" "$scr"; then
       [ "${pane_latch[$p]:-}" ] || log "rate-limit choice prompt on a pane — selected 'Stop and wait'; latched it as limited"
       pane_latch[$p]=seen
@@ -926,6 +979,7 @@ while :; do
   idle_since=0
 
   reconcile_clock   # rate-limited; ensures compute_wait sees a true "now"
+  install_busy_format
   scan_panes
   if [ "${#pane_latch[@]}" -gt 0 ]; then
     # Any latched pane's screen feeds the pane-text time fallback in compute_wait.
