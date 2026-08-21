@@ -36,7 +36,13 @@ CCAR_STATE_JSON="$CCAR_STATE_DIR/state.json"
 # actual pause. "session" is the 5-hour window; the on-screen time is just the
 # local render of rate_limits.five_hour.resets_at (the authoritative signal).
 CCAR_DETECT_REGEX="(hit your (session|usage) limit|usage limit reached|session limit.*reset)"
-CCAR_POLL_SECONDS=5                    # how often to poll while watching
+# How often to run the FULL scan (limit detection, usage state, rc/burn checks).
+# This is the monitor's dominant running cost, and it does not need to be quick:
+# the resume fires at the reset time read from state.json, not at poll
+# granularity, and a pane that hits the limit between polls just waits anyway.
+# Measured on one box: 5s costs ~6.4% of a core, 15s ~3.3%. The working-glyph
+# indicator is NOT tied to this — see CCAR_BUSY_REFRESH_MS.
+CCAR_POLL_SECONDS=15                   # how often to poll while watching
 # Matched (grep -E) against a claude pane to decide "a turn is running right now",
 # published to tmux as the window option @ccar_busy so the window list can show a
 # working session differently from a parked one.
@@ -71,6 +77,10 @@ CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
 # raise if the animation ever shows up in CPU. 0 disables the animation and pins
 # the indicator to the first glyph.
 CCAR_BUSY_ANIM_MS=400
+# How often to re-read which panes are working, independent of the full scan, so
+# the indicator stays fresh without paying for a scan. One capture per attached
+# pane; panes on a server with no client attached cost nothing at all.
+CCAR_BUSY_REFRESH_MS=2000
 # The account is treated as rate-limited when the status line's five-hour
 # used_percentage (in state.json) is at/above this — but only while the reading
 # is inside its validity window (see CCAR_USAGE_FRESH_SECONDS). A valid reading

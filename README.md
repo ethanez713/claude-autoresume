@@ -196,6 +196,30 @@ restarting the monitor re-derives from the original rather than patching a patch
 
 Set `CCAR_BUSY_REGEX=""` to switch the whole thing off.
 
+### Cost
+
+Measured on this box (one bash loop, no daemon, no network), as a share of one core:
+
+| state | cost |
+|---|---|
+| walked away / detached | **~1.5%** |
+| attached, everything idle | ~1.5% |
+| attached, a session working (animating) | ~4.9% |
+| scan-only floor, indicator off | 1.5% |
+
+Two things keep the idle case cheap, which is the case that matters — this tool
+exists for sessions you walk away from. **Nothing paints when no client is
+attached:** the colour capture and the animation are both skipped for a server
+nobody is looking at, so a detached box costs the scan and nothing else. And the
+**scan interval is decoupled from the indicator**: `CCAR_POLL_SECONDS` (15s) only
+governs limit detection, which does not need to be quick — the resume fires at
+the reset time read from `state.json`, not at poll granularity — while
+`CCAR_BUSY_REFRESH_MS` (2s) keeps the glyph fresh for a fraction of the cost.
+
+To trim further: raise `CCAR_POLL_SECONDS`, raise `CCAR_BUSY_ANIM_MS` (or set it
+to `0` for a static glyph), or set `CCAR_BUSY_REGEX=""` to drop the indicator
+entirely and sit at the floor.
+
 ## Security
 
 No network calls outside `claude`→Anthropic. No deps beyond bash + tmux + python

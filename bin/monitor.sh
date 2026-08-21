@@ -46,6 +46,7 @@ declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate
 declare -A pane_latch=()
 declare -A pane_snap=()
 declare -A pane_snap_ok=()
+declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its window-status format
@@ -209,10 +210,29 @@ install_busy_format() {
   done < <(live_sessions)
 }
 
+socket_attached() { # $1 = socket path; cached for the length of one scan
+  local s="$1"
+  if [ -z "${attached[$s]:-}" ]; then
+    if [ -n "$(tmux -S "$s" list-clients -F '#{client_name}' 2>/dev/null | head -1)" ]; then
+      attached[$s]=yes
+    else
+      attached[$s]=no
+    fi
+  fi
+  [ "${attached[$s]}" = yes ]
+}
+
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
   local busy=0
-  screen_shows_working "$(capture_ansi "$1")" && busy=1
+  # With no client attached to this server nobody can see the window list, so the
+  # colour capture AND the animation it feeds are pure battery cost — and that is
+  # the normal state for the walked-away sessions this tool exists for. Reporting
+  # not-working parks the animation too, since poll_sleep ticks only for servers
+  # that have a working pane.
+  if socket_attached "$(pr_socket "$1")"; then
+    screen_shows_working "$(capture_ansi "$1")" && busy=1
+  fi
   # Re-set every poll rather than only on a change: the option lives on the
   # window, so moving/splitting/renumbering panes can strand a stale value that
   # a change-gated writer would never correct.
@@ -243,15 +263,26 @@ busy_sockets() { # sockets with at least one pane currently working
 # is per server rather than per working pane. Falls back to a plain sleep when
 # nothing is working, so an all-idle box is exactly as quiet as it was before.
 poll_sleep() {
-  local step_ms="${CCAR_BUSY_ANIM_MS:-400}" frames socks i socket nap
-  socks="$(busy_sockets)"
-  if [ -z "$socks" ] || [ "$step_ms" -le 0 ] || [ -z "${CCAR_BUSY_GLYPHS:-}" ]; then
+  local step_ms="${CCAR_BUSY_ANIM_MS:-400}" frames socks i socket nap every p
+  if [ "$step_ms" -le 0 ] || [ -z "${CCAR_BUSY_GLYPHS:-}" ] || [ "${#pane_busy[@]}" -eq 0 ]; then
     sleep "$CCAR_POLL_SECONDS"; return
   fi
   frames=$(( CCAR_POLL_SECONDS * 1000 / step_ms ))
   [ "$frames" -gt 0 ] || frames=1
   nap="$(printf '%d.%03d' $((step_ms / 1000)) $((step_ms % 1000)))"
+  # How often, in frames, to re-read who is working. The full scan is far too
+  # expensive to run at the rate the indicator wants to be fresh (it re-reads
+  # state.json and runs the rc/burn checks), so the two are decoupled: this loop
+  # re-reads only the pane colours, which is one capture per attached pane.
+  every=$(( ${CCAR_BUSY_REFRESH_MS:-2000} / step_ms ))
+  [ "$every" -gt 0 ] || every=1
+  socks="$(busy_sockets)"
   for ((i = 0; i < frames; i++)); do
+    if [ $(( i % every )) -eq 0 ]; then
+      [ "$i" -gt 0 ] && for p in "${!pane_busy[@]}"; do publish_busy "$p"; done
+      socks="$(busy_sockets)"
+    fi
+    if [ -z "$socks" ]; then sleep "$nap"; continue; fi   # nothing working: idle out the rest
     busy_frame=$(( busy_frame + 1 ))
     while IFS= read -r socket; do
       [ -n "$socket" ] || continue
@@ -946,6 +977,7 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
 # key injection while the account is demonstrably not limited.
 scan_panes() {
   local p scr ustate was
+  attached=()                # re-probe each scan: attaching must light the indicator back up
   refresh_state_cache        # main-shell context, so the mtime cache persists across polls
   ustate="$(usage_state)"
   while IFS= read -r p; do
