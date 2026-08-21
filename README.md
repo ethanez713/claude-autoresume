@@ -202,23 +202,46 @@ Measured on this box (one bash loop, no daemon, no network), as a share of one c
 
 | state | cost |
 |---|---|
-| walked away / detached | **~1.5%** |
-| attached, everything idle | ~1.5% |
-| attached, a session working (animating) | ~4.9% |
-| scan-only floor, indicator off | 1.5% |
+| walked away / detached | **~1.1%** |
+| attached, everything idle | ~1.1% |
+| attached, a session working (animating) | ~4.3% |
 
-Two things keep the idle case cheap, which is the case that matters — this tool
-exists for sessions you walk away from. **Nothing paints when no client is
+The idle case is the one that matters — this tool exists for sessions you walk
+away from — and three things keep it cheap. **Nothing paints when no client is
 attached:** the colour capture and the animation are both skipped for a server
-nobody is looking at, so a detached box costs the scan and nothing else. And the
-**scan interval is decoupled from the indicator**: `CCAR_POLL_SECONDS` (15s) only
-governs limit detection, which does not need to be quick — the resume fires at
-the reset time read from `state.json`, not at poll granularity — while
-`CCAR_BUSY_REFRESH_MS` (2s) keeps the glyph fresh for a fraction of the cost.
+nobody is looking at. **The scan interval is decoupled from the indicator:**
+`CCAR_POLL_SECONDS` (15s) governs only limit detection, which needn't be quick —
+the resume fires at the reset time read from `state.json`, not at poll
+granularity — while `CCAR_BUSY_REFRESH_MS` (2s) keeps the glyph fresh for a
+fraction of the cost. And **one registry walk serves the whole poll:** asking
+"which panes are alive and running claude" costs two tmux round-trips per pane,
+and three different consumers used to ask independently.
 
-To trim further: raise `CCAR_POLL_SECONDS`, raise `CCAR_BUSY_ANIM_MS` (or set it
-to `0` for a static glyph), or set `CCAR_BUSY_REGEX=""` to drop the indicator
-entirely and sit at the floor.
+To trim further: raise `CCAR_BUSY_REFRESH_MS` (the dominant remaining cost when
+attached), raise `CCAR_POLL_SECONDS`, raise `CCAR_BUSY_ANIM_MS` (or `0` for a
+static glyph), or set `CCAR_BUSY_REGEX=""` to drop the indicator and sit at the
+floor.
+
+### Resource heartbeat
+
+Every `CCAR_STATS_SECONDS` (300) the monitor appends one JSON line to
+`stats.jsonl` in the state dir — its CPU over the window, including every child
+it reaped, alongside the shape it was running against:
+
+```json
+{"ts":"…","window_s":15,"cpu_ms":650,"cpu_pct":4.3,"polls":1,"frames":37,
+ "registered":8,"claude":7,"busy":3,"servers_attached":1,"latched":0}
+```
+
+It's a log, not a dashboard: nothing reads it automatically. The shape fields are
+what make a surprising `cpu_pct` actionable rather than merely alarming — a climb
+with `registered` climbing is a pane-registry leak, a climb at constant shape is
+the monitor itself. Trimmed to half of `CCAR_STATS_MAX_BYTES` when it exceeds it;
+`CCAR_STATS_SECONDS=0` turns it off.
+
+```sh
+tail -5 ~/.claude/autoresume/stats.jsonl | jq -c '{ts,cpu_pct,claude,busy}'
+```
 
 ## Security
 

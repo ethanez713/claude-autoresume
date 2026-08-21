@@ -18,6 +18,13 @@ CCAR_TMUX_CONF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tmux.conf"
 # WT is xterm-compatible + truecolor, so we attach as xterm-256color. Set empty
 # to keep whatever TERM your shell exports.
 CCAR_OUTER_TERM="xterm-256color"
+# Resource heartbeat: one JSON line per window with the monitor's CPU (its own
+# plus every child it reaped) and the shape it was running against — how many
+# panes were registered, running claude, working, and on an attached server. It
+# exists to answer "is this costing me battery" without re-deriving it by hand;
+# read it with `tail`/`jq`, nothing reads it automatically. 0 disables.
+CCAR_STATS_SECONDS=300
+CCAR_STATS_MAX_BYTES=262144            # trimmed to half this when exceeded
 CCAR_STATE_DIR="$HOME/.claude/autoresume"   # runtime state (0700). Holds state.json, cancel sentinel, monitor.pid.
 # Pane registry (0700): one file per watched Claude pane, written by cc-run and
 # read by the monitor, so the monitor watches your panes across ANY tmux server
@@ -27,6 +34,7 @@ CCAR_PANES_DIR="$CCAR_STATE_DIR/panes"
 # --- signal sources ----------------------------------------------------------
 # Authoritative reset time, written by the patched statusline.py (see PLAN.md §3a).
 CCAR_STATE_JSON="$CCAR_STATE_DIR/state.json"
+CCAR_STATS_JSONL="$CCAR_STATE_DIR/stats.jsonl"
 
 # --- detection ---------------------------------------------------------------
 # Regex (grep -E -i) matched against the captured claude pane to decide "paused at limit".

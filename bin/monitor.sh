@@ -49,6 +49,9 @@ declare -A pane_snap_ok=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
+poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
+poll_panes=""                     # the subset running claude
+stats_last_ts=0; stats_last_cpu=0; stats_polls=0; stats_frames=0
 declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its window-status format
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
@@ -242,6 +245,42 @@ publish_busy() { # $1 = paneref
   txp "$1" refresh-client -S 2>/dev/null   # repaint now instead of at the next status-interval
 }
 
+# Cumulative CPU of the monitor AND every child it has reaped, in 10ms ticks.
+# The forks (tmux, grep) are most of the cost, so self-time alone would say the
+# monitor is free. Stripping through the last ')' keeps a space in comm from
+# shifting the fields.
+cpu_ticks() {
+  local st; st="$(</proc/$$/stat)"; st="${st#*") "}"
+  local -a f; read -ra f <<<"$st"
+  echo $(( f[11] + f[12] + f[13] + f[14] ))
+}
+
+# One wide event per window answering "what is this costing, and on what". Not a
+# counter: the shape (how many panes, how many attached, how many working) is
+# what makes a surprising cpu_pct actionable rather than just alarming.
+stats_emit() {
+  local every="${CCAR_STATS_SECONDS:-300}"
+  [ "$every" -gt 0 ] 2>/dev/null || return 0
+  local now; now=$(date +%s)
+  if [ "$stats_last_ts" -eq 0 ]; then stats_last_ts=$now; stats_last_cpu=$(cpu_ticks); return 0; fi
+  [ $(( now - stats_last_ts )) -ge "$every" ] || return 0
+  local wall=$(( now - stats_last_ts )) t; t=$(cpu_ticks)
+  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 att=0 k
+  pct10=$(( dcpu * 10 / wall ))          # ticks are 10ms, so ticks/second IS percent-of-core
+  for k in "${!pane_busy[@]}"; do [ "${pane_busy[$k]}" = 1 ] && busy=$(( busy + 1 )); done
+  for k in "${!attached[@]}";  do [ "${attached[$k]}" = yes ] && att=$(( att + 1 )); done
+  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"servers_attached":%d,"latched":%d}\n' \
+    "$(date -Is)" "$wall" "$(( dcpu * 10 ))" "$(( pct10 / 10 ))" "$(( pct10 % 10 ))" \
+    "$stats_polls" "$stats_frames" "$(count "$poll_registry")" "$(count "$poll_panes")" \
+    "$busy" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
+  stats_last_ts=$now; stats_last_cpu=$t; stats_polls=0; stats_frames=0
+  local max="${CCAR_STATS_MAX_BYTES:-262144}"
+  if [ "$(stat -c%s "$CCAR_STATS_JSONL" 2>/dev/null || echo 0)" -gt "$max" ]; then
+    tail -c $(( max / 2 )) "$CCAR_STATS_JSONL" > "$CCAR_STATS_JSONL.tmp" 2>/dev/null \
+      && mv "$CCAR_STATS_JSONL.tmp" "$CCAR_STATS_JSONL"
+  fi
+}
+
 busy_glyph() { # $1 = frame index (wraps)
   local -a g
   read -ra g <<<"${CCAR_BUSY_GLYPHS:-}"   # read never globs, so a bare * stays a glyph
@@ -283,7 +322,7 @@ poll_sleep() {
       socks="$(busy_sockets)"
     fi
     if [ -z "$socks" ]; then sleep "$nap"; continue; fi   # nothing working: idle out the rest
-    busy_frame=$(( busy_frame + 1 ))
+    busy_frame=$(( busy_frame + 1 )); stats_frames=$(( stats_frames + 1 ))
     while IFS= read -r socket; do
       [ -n "$socket" ] || continue
       tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; refresh-client -S 2>/dev/null
@@ -716,7 +755,7 @@ rc_check() { # called once per idle poll; must never disturb the resume path
     fi
     mins="$(rc_backoff_minutes "$idx")"
     rc_next_attempt[$p]=$((now + mins * 60))
-  done < <(claude_panes)
+  done <<<"$poll_panes"
 
   # Drop state for panes that are gone (closed, or no longer running claude).
   for p in "${!rc_missing_since[@]}"; do
@@ -827,6 +866,7 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
   local target="$1" mode="$2" now remaining mins step before after
   while :; do
     [ -e "$CANCEL_FILE" ] && return 1
+    refresh_poll_panes
     scan_panes   # a pane hitting the limit mid-wait still gets latched + its choice prompt answered promptly
     reconcile_clock   # rate-limited; keeps a long wait honest if the clock drifts
     now=$(now_epoch)
@@ -899,12 +939,21 @@ registry_panerefs() {
   done
 }
 
-claude_panes() { # panerefs of every live registered pane whose foreground is claude
+claude_panes() { # $1 = newline-separated panerefs; keeps those whose foreground is claude
   local pr
   while IFS= read -r pr; do
     [ -z "$pr" ] && continue
     foreground_is_claude "$pr" && printf '%s\n' "$pr"   # never inject into a bare shell
-  done < <(registry_panerefs)
+  done <<<"$1"
+}
+
+# Answering "which panes are alive and running claude" costs two tmux round-trips
+# per registered pane, and scan_panes, rc_check and the idle-exit check each used
+# to ask independently — three walks per poll for an answer that cannot change
+# within one. Walk once per poll here; every consumer reads the globals.
+refresh_poll_panes() {
+  poll_registry="$(registry_panerefs)"
+  poll_panes="$(claude_panes "$poll_registry")"
 }
 
 unlatch_pane() { # $1 = paneref
@@ -982,8 +1031,14 @@ scan_panes() {
   ustate="$(usage_state)"
   while IFS= read -r p; do
     [ -z "$p" ] && continue
-    scr="$(capture "$p")"
     publish_busy "$p"
+    # Every consumer of $scr below is gated on the account looking limited or on
+    # this pane already being latched. With a clear reading and no latch — the
+    # normal state — capturing it is a tmux round-trip whose result is discarded.
+    scr=""
+    if [ "$ustate" != clear ] || [ -n "${pane_latch[$p]:-}" ]; then
+      scr="$(capture "$p")"
+    fi
     if [ "$ustate" != clear ] && dismiss_limit_prompt "$p" "$scr"; then
       [ "${pane_latch[$p]:-}" ] || log "rate-limit choice prompt on a pane — selected 'Stop and wait'; latched it as limited"
       pane_latch[$p]=seen
@@ -1012,7 +1067,7 @@ scan_panes() {
         pane_snap_ok[$p]=0
       fi
     fi
-  done < <(claude_panes)
+  done <<<"$poll_panes"
 }
 
 # Resume gate, evaluated per latched pane at reset time. Resume when:
@@ -1060,7 +1115,8 @@ while :; do
   fi
   # No registered pane still alive? Allow a grace window (covers launch races and
   # cutover) before exiting — the next `claude` launch restarts the monitor.
-  if [ -z "$(registry_panerefs)" ]; then
+  refresh_poll_panes
+  if [ -z "$poll_registry" ]; then
     now=$(date +%s)
     [ "$idle_since" -eq 0 ] && idle_since=$now
     if [ $((now - idle_since)) -ge "${CCAR_IDLE_EXIT_SECONDS:-60}" ]; then
@@ -1140,5 +1196,7 @@ while :; do
   fi
   burn_check
   rc_check
+  stats_polls=$(( stats_polls + 1 ))
+  stats_emit
   poll_sleep
 done
