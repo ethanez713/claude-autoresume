@@ -39,19 +39,38 @@ CCAR_DETECT_REGEX="(hit your (session|usage) limit|usage limit reached|session l
 CCAR_POLL_SECONDS=5                    # how often to poll while watching
 # Matched (grep -E) against a claude pane to decide "a turn is running right now",
 # published to tmux as the window option @ccar_busy so the window list can show a
-# working session differently from a parked one. Claude's TUI paints a spinner
-# line at column 1 above the input box while it works — the glyph cycles
-# (✻ ✽ ✢ ✶ ✳ ✺ ✷ * ·) and the text does too ("Processing…", "Beboppin'…",
-# "Waiting for 1 background agent to finish"), so we key on the column-1 glyph
-# rather than the wording. Set empty to switch the indicator off.
-CCAR_BUSY_REGEX='(^[✻✽✢✶✳✺✷*·][[:space:]]|esc to interrupt)'
-# What the window name renders as once @ccar_busy is set. Claude Code emits the
-# same title glyph (✳) idle or working, so we rewrite a LEADING ✳ to ● — the
-# anchor means any other glyph it puts there (the moon phases it ticks while a
-# subagent runs) passes through untouched, keeping dispatch distinguishable from
-# a plain in-session turn. The monitor splices this into window-status-format on
-# whichever tmux server your panes live on.
-CCAR_BUSY_NAME_FORMAT='#{?#{==:#{@ccar_busy},1},#{s|^✳|●|:#{window_name}},#{window_name}}'
+# working session differently from a parked one.
+#
+# This has to key on COLOUR, not on the glyph or the wording. A finished turn
+# leaves its own spinner-shaped line on screen — "✻ Cooked for 24m 49s" — so a
+# plain-text match on the glyph reads every parked session as working. What
+# actually separates them is that the glyph is painted in the active colour while
+# the turn runs and in grey (38;5;246, same as the completion line) once it ends.
+# The verb pulses through several shades but the GLYPH's colour is stable, so the
+# glyph is what we match. Re-derive it for another theme with:
+#   tmux capture-pane -pe -t <pane> | grep -aE $'^\[' | cat -v
+# The wording is useless here: it is randomised per turn ("Processing…",
+# "Beboppin'…", "Doodling…") and one active state ("Waiting for 1 background
+# agent to finish") is past-tense-shaped exactly like the completion line.
+# Set empty to switch the indicator off.
+CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
+# What the window name renders as while a turn is running. Claude Code emits the
+# same title glyph (✳) idle or working, so we swap a LEADING ✳ for the current
+# spinner frame (@ccar_spin, advanced by the monitor). The #{m:✳*} guard means
+# any other glyph it puts there — the moon phases it ticks while a subagent runs
+# — is left alone rather than having a spinner prepended to it, so dispatch stays
+# distinguishable from a plain in-session turn. The monitor splices this into
+# window-status-format on whichever tmux server your panes live on.
+CCAR_BUSY_NAME_FORMAT='#{?#{&&:#{==:#{@ccar_busy},1},#{m:✳*,#{window_name}}},#{@ccar_spin}#{s|^✳||:#{window_name}},#{window_name}}'
+# Frames for that spinner, cycled in order — Claude's own set, so the window list
+# animates the way the session itself does. Whitespace-separated; a single glyph
+# gives a static indicator.
+CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
+# Milliseconds per frame. Each frame costs ONE tmux call per server that has a
+# working pane (set-option + refresh-client, batched), so this is the knob to
+# raise if the animation ever shows up in CPU. 0 disables the animation and pins
+# the indicator to the first glyph.
+CCAR_BUSY_ANIM_MS=400
 # The account is treated as rate-limited when the status line's five-hour
 # used_percentage (in state.json) is at/above this — but only while the reading
 # is inside its validity window (see CCAR_USAGE_FRESH_SECONDS). A valid reading

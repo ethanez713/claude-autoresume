@@ -149,32 +149,52 @@ doesn't update, check the profile's "Suppress title changes" isn't enabled.)
 
 Claude Code emits the same title glyph (`✳`) whether a session is parked at the
 prompt or burning tokens, so a window list of several sessions can't tell you
-which ones are actually running. The monitor closes that gap: on every poll it
-checks each watched pane for the spinner line Claude paints while a turn is in
-flight (`CCAR_BUSY_REGEX`) and publishes the answer as the tmux window option
-`@ccar_busy`. It also patches `window-status-format` so a *leading* `✳` renders
-as `●` on windows where that option is `1`:
+which ones are actually running. The monitor closes that gap and renders a
+working session as Claude's own spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 
 ```
-1:● adbconnect          <- running
+1:✽ adbconnect          <- running
 2:✳ rotblock            <- idle at the prompt
+3:🌒 ezhou              <- subagent dispatched
 ```
 
-The rewrite is anchored, so any other glyph Claude puts in the title — the moon
-phases it ticks while a subagent runs — passes through untouched, which keeps a
-dispatched subagent distinguishable from a plain in-session turn.
+**Detection keys on colour, not on the glyph or the wording.** A finished turn
+leaves a spinner-*shaped* line on screen — `✻ Cooked for 24m 49s` — so matching
+the glyph reads every parked session as working. What separates them is that
+Claude paints the glyph in an active colour while the turn runs and in grey once
+it ends. The verb pulses through several shades but the glyph's colour is
+stable, so the glyph is what `CCAR_BUSY_REGEX` matches, against a
+`capture-pane -pe`. The wording is no help: it's randomised per turn
+("Processing…", "Beboppin'…", "Doodling…") and one genuinely active state,
+`✻ Waiting for 1 background agent to finish`, is shaped exactly like the
+completion line. Re-derive the colour for another theme with:
+
+```
+tmux capture-pane -pe -t <pane> | grep -aE $'^\033\[' | cat -v
+```
+
+The result is published as the window option `@ccar_busy`, and the monitor
+patches `window-status-format` to swap a *leading* `✳` for the current frame
+(`@ccar_spin`). The swap only fires on a leading `✳`, so any other glyph Claude
+puts in the title — the moon phases it ticks while a subagent runs — is left
+alone rather than having a spinner prepended to it, keeping dispatch
+distinguishable from a plain in-session turn.
+
+Frames advance during the monitor's poll sleep: one batched `set-option ;
+refresh-client -S` per *server* per frame, not per working pane. When nothing is
+working it falls back to a plain sleep, so an all-idle box is exactly as quiet as
+it was before. Raise `CCAR_BUSY_ANIM_MS` (default 400) to slow it down; set it to
+`0`, or list a single glyph in `CCAR_BUSY_GLYPHS`, for a static indicator.
 
 The format is patched on whichever tmux server your panes live on (yours as
 often as the `ccar` fallback), which is why it isn't shipped in this repo's
-`tmux.conf`. The monitor rewrites only the `#W` / `#{window_name}` already in
-your format rather than overwriting the option, so any customisation survives;
-if your format names no window at all it logs a line and leaves it alone.
-`CCAR_BUSY_NAME_FORMAT` controls what the name renders as.
+`tmux.conf`. Only the `#W` / `#{window_name}` already in your format is
+rewritten, so any customisation survives; if your format names no window at all
+it logs a line and leaves it alone. The pre-patch value is stashed in
+`@ccar_orig_window-status-format`, so changing `CCAR_BUSY_NAME_FORMAT` and
+restarting the monitor re-derives from the original rather than patching a patch.
 
-Detection costs nothing extra — it reads the pane capture the limit scan already
-takes — and a transition forces a `refresh-client -S` so the bar repaints
-immediately instead of at the next `status-interval`. Set `CCAR_BUSY_REGEX=""`
-to switch the whole thing off.
+Set `CCAR_BUSY_REGEX=""` to switch the whole thing off.
 
 ## Security
 
