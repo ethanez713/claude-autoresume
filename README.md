@@ -155,7 +155,7 @@ working session as Claude's own spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and
 ```
 1:✽ adbconnect          <- running
 2:✳ rotblock            <- idle at the prompt
-3:🌒 ezhou              <- subagent dispatched
+3:🌒 notes              <- subagent dispatched
 ```
 
 **Detection keys on colour, not on the glyph or the wording.** A finished turn
