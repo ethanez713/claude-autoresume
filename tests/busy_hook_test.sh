@@ -86,25 +86,37 @@ eq "empty TMUX_PANE: silent"        "" "$out"
 eq "empty TMUX_PANE: exit 0"        "0" "$rc"
 eq "empty TMUX_PANE: no-op"         "(none)" "$(hook_state)"
 
-echo "decide_busy (stale-clear rule as a pure function)"
+echo "decide_busy (frozen-pane stale-clear rule as a pure function)"
 CCAR_BUSY_STALE_SECONDS=20
-eq "hook=0 -> busy 0, regardless of scrape" "0" "$(decide_busy 0 1 '')"
-eq "hook=1, not attached (scrape empty) -> busy 1" "1" "$(decide_busy 1 '' '')"
-eq "hook=1, scrape agrees -> busy 1"        "1" "$(decide_busy 1 1 '')"
-eq "hook='', attached, scrape working -> busy 1"  "1" "$(decide_busy '' 1 '')"
-eq "hook='', attached, scrape idle -> busy 0"     "0" "$(decide_busy '' 0 '')"
-eq "hook='', not attached -> busy 0"              "0" "$(decide_busy '' '' '')"
-eq "hook=1, scrape disagrees, held under stale threshold -> stays busy 1" \
-   "1" "$(decide_busy 1 0 19)"
-eq "hook=1, scrape disagrees, at stale threshold -> busy 0" \
-   "0" "$(decide_busy 1 0 20)"
-eq "hook=1, scrape disagrees, past stale threshold -> busy 0" \
-   "0" "$(decide_busy 1 0 45)"
-# A scrape agreeing in between resets the clock: publish_busy models this by
-# clearing pane_hook_veto (veto_age reset to ""), which is what the caller would
-# pass on the next poll after a scrape says "working".
-eq "scrape agreeing resets: veto_age '' after a working scrape -> busy 1" \
-   "1" "$(decide_busy 1 1 '')"
+# Args: hook scrape frozen veto_age
+eq "scrape working beats hook=0 (a background wake fires no UserPromptSubmit)" \
+   "1" "$(decide_busy 0 1 0 '')"
+eq "hook=0, scrape idle -> busy 0"                "0" "$(decide_busy 0 0 1 '')"
+eq "hook=1, not attached (scrape empty) -> busy 1" "1" "$(decide_busy 1 '' '' '')"
+eq "hook=1, scrape agrees -> busy 1"               "1" "$(decide_busy 1 1 0 '')"
+eq "hook='', attached, scrape working -> busy 1"   "1" "$(decide_busy '' 1 0 '')"
+eq "hook='', attached, scrape idle -> busy 0"      "0" "$(decide_busy '' 0 1 '')"
+eq "hook='', not attached -> busy 0"               "0" "$(decide_busy '' '' '' '')"
+
+# THE regression this rule exists for: while a tool call runs, the pane paints
+# the tool's output where the spinner line would be, so the scrape reads idle on
+# a turn that is very much alive. The screen still repaints, and that is what
+# keeps the flag up — no veto_age, however large, may override it.
+eq "hook=1, no spinner but REPAINTING -> busy 1 (long tool call)" \
+   "1" "$(decide_busy 1 0 0 '')"
+eq "hook=1, no spinner, repainting, huge veto_age -> still busy 1" \
+   "1" "$(decide_busy 1 0 0 9999)"
+
+eq "hook=1, frozen and spinnerless, under threshold -> stays busy 1" \
+   "1" "$(decide_busy 1 0 1 19)"
+eq "hook=1, frozen and spinnerless, at threshold -> busy 0" \
+   "0" "$(decide_busy 1 0 1 20)"
+eq "hook=1, frozen and spinnerless, past threshold -> busy 0" \
+   "0" "$(decide_busy 1 0 1 45)"
+# Either disproof resets the clock, which publish_busy models by clearing
+# pane_hook_veto so the next poll passes veto_age "".
+eq "a repaint resets the clock -> busy 1" "1" "$(decide_busy 1 0 0 '')"
+eq "a spinner resets the clock -> busy 1" "1" "$(decide_busy 1 1 1 '')"
 
 
 echo "read_hook_busy: falls back to \$CCAR_STATE_DIR/busy when CCAR_BUSY_DIR is unset"
@@ -124,8 +136,9 @@ echo "publish_busy: stale-veto timer must not survive hook leaving 1 (regression
 # server: socket_attached/capture_ansi/screen_shows_working/txp are ordinary
 # functions, redefinable after sourcing monitor.sh for the rest of this file.
 test_scrape_working=0   # 0 = scrape disagrees ("not working"), 1 = agrees
+test_screen="frame-a"   # what the pane is "showing"; change it to simulate a repaint
 socket_attached() { return 0; }   # every pane looks attached to this test
-capture_ansi() { :; }             # content is irrelevant; screen_shows_working is stubbed below
+capture_ansi() { printf '%s' "$test_screen"; }
 screen_shows_working() { [ "$test_scrape_working" = 1 ]; }
 txp() { return 0; }               # no real tmux server to talk to
 
@@ -135,8 +148,19 @@ veto_state() { [ -n "${pane_hook_veto[$1]:-}" ] && echo armed || echo clear; }
 
 printf '1\t%s\n' "$(date +%s)" >"$busy_dir/$key2"   # UserPromptSubmit fired
 test_scrape_working=0                                  # spinner not visible yet
+publish_busy "$pr2"                                    # first poll only snapshots the screen
+eq "first poll cannot arm the veto — nothing to compare against yet" \
+   "clear" "$(veto_state "$pr2")"
+publish_busy "$pr2"                                    # screen unchanged => frozen
+eq "veto armed once the pane is frozen AND spinnerless under hook=1" \
+   "armed" "$(veto_state "$pr2")"
+
+test_screen="frame-b"                                  # the turn repaints
 publish_busy "$pr2"
-eq "veto armed once hook=1 disagrees with the scrape" "armed" "$(veto_state "$pr2")"
+eq "a repaint disproves the veto and resets the clock" "clear" "$(veto_state "$pr2")"
+eq "still busy through the repaint" "1" "${pane_busy[$pr2]:-}"
+
+publish_busy "$pr2"; eq "re-armed after freezing again" "armed" "$(veto_state "$pr2")"
 
 printf '0\t%s\n' "$(date +%s)" >"$busy_dir/$key2"   # Stop fired
 publish_busy "$pr2"

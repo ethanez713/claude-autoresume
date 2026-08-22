@@ -49,7 +49,8 @@ declare -A pane_snap_ok=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we published for its server
-declare -A pane_hook_veto=()      # paneref -> epoch the scrape first disagreed with a hook-set 1
+declare -A pane_busy_snap=()      # paneref -> hash of its last captured screen, for the frozen-pane test
+declare -A pane_hook_veto=()      # paneref -> epoch the pane went frozen-and-spinnerless under a hook-set 1
 declare -A pane_hook_veto_logged=() # paneref -> 1 once we've logged that pane's stranded flag
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
@@ -274,66 +275,74 @@ read_hook_busy() { # $1 = paneref
 
 # Pure decision for @ccar_busy, split out of publish_busy so it can be unit
 # tested with no tmux involved.
-#   $1 hook      = "0" | "1" | ""   (read_hook_busy)
-#   $2 scrape    = "0" | "1" | ""   (screen_shows_working result; "" means it was
-#                                     never attempted — hook said 0, or the
-#                                     server has no client attached)
-#   $3 veto_age  = seconds since the scrape first disagreed with a hook-set 1,
-#                  or "" while it has never disagreed
+#   $1 hook     = "0" | "1" | ""   (read_hook_busy; "" = no hook state for this pane)
+#   $2 scrape   = "0" | "1" | ""   (screen_shows_working; "" = never attempted,
+#                                    i.e. no client is attached to this server)
+#   $3 frozen   = "0" | "1" | ""   (this pane's screen is byte-identical to the
+#                                    previous refresh; "" when unknown)
+#   $4 veto_age = seconds the pane has been BOTH frozen and scraping idle while
+#                 the hook says 1, or "" if that has not been true yet
 # Echoes "0" or "1".
+#
+# The two signals disagree in both directions, and each is authoritative in one:
+#
+#   scrape=1 always wins. Claude Code fires no hook when a background-task
+#   notification (a finished subagent, a scheduled wake) resumes a session, so
+#   the hook can still read 0 from the last Stop while a turn is genuinely
+#   running. Seeing the spinner is proof, whatever the hook says.
+#
+#   hook=1 outlives the scrape, because the scrape false-negatives constantly:
+#   while a tool call runs the pane paints its output instead of the spinner
+#   line, so "no spinner" is not evidence of idleness. Only a FROZEN screen is
+#   — a live turn repaints (the spinner ticks, the timer counts) and an
+#   interrupted one does not. So a hook-set 1 is cleared only after the pane has
+#   held still AND shown no spinner for CCAR_BUSY_STALE_SECONDS, which is what
+#   an Esc-interrupt or a kill -9 leaves behind. This is the same
+#   frozen-means-parked test should_resume() uses on the rate-limit path.
 decide_busy() {
-  local hook="$1" scrape="$2" veto_age="$3"
-  case "$hook" in
-    0) printf '0' ;;
-    1)
-      if [ "$scrape" = 1 ] || [ -z "$scrape" ]; then
-        printf '1'
-      elif [ -n "$veto_age" ] && [ "$veto_age" -ge "${CCAR_BUSY_STALE_SECONDS:-20}" ]; then
-        printf '0'    # scrape has disagreed long enough to assume Stop was lost
-      else
-        printf '1'
-      fi
-      ;;
-    *) [ "$scrape" = 1 ] && printf '1' || printf '0' ;;
-  esac
+  local hook="$1" scrape="$2" frozen="$3" veto_age="$4"
+  [ "$scrape" = 1 ] && { printf '1'; return; }
+  [ "$hook" = 1 ] || { printf '0'; return; }
+  [ "$frozen" = 1 ] || { printf '1'; return; }   # repainting, or nobody attached to look
+  if [ -n "$veto_age" ] && [ "$veto_age" -ge "${CCAR_BUSY_STALE_SECONDS:-20}" ]; then
+    printf '0'
+  else
+    printf '1'
+  fi
 }
 
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local pr="$1" hook scrape="" att=0 busy now veto_age=""
+  local pr="$1" hook scrape="" frozen="" att=0 busy now veto_age="" ansi shot
   hook="$(read_hook_busy "$pr")"
   socket_attached "$(pr_socket "$pr")" && att=1
-  # hook==0 -> never scrape (the cost win: an idle session pays zero captures).
-  # hook==1 or "" -> scrape only when attached; nothing is visible on an
-  # unattached server, so the capture would be pure cost for no one to see.
-  if [ "$hook" != 0 ] && [ "$att" = 1 ]; then
-    if screen_shows_working "$(capture_ansi "$pr")"; then scrape=1; else scrape=0; fi
+  # One capture per attached pane, as before the hooks existed — it answers both
+  # "is the spinner up" and "did anything repaint". An unattached server is still
+  # free: nobody can see that window list, so neither question is worth asking.
+  if [ "$att" = 1 ]; then
+    ansi="$(capture_ansi "$pr")"
+    if screen_shows_working "$ansi"; then scrape=1; else scrape=0; fi
+    shot="$(hash_of "$ansi")"
+    if [ "$shot" = "${pane_busy_snap[$pr]:-}" ]; then frozen=1; else frozen=0; fi
+    pane_busy_snap[$pr]="$shot"
   fi
-  # Track how long a hook-set 1 has disagreed with the scrape: this is what
-  # catches a Stop that never fired (Esc-interrupt, crash, kill -9). We do NOT
-  # clear the hook state file here — a later scrape agreeing flips it back to 1
-  # via the branch below, so a permission prompt answered mid-turn un-strands it.
-  if [ "$hook" = 1 ]; then
-    if [ "$att" = 1 ]; then
-      if [ "$scrape" = 1 ]; then
-        unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
-      else
-        now="$(now_epoch)"
-        [ -n "${pane_hook_veto[$pr]:-}" ] || pane_hook_veto[$pr]=$now
-        veto_age=$(( now - pane_hook_veto[$pr] ))
-      fi
-    fi
-    # not attached: leave any existing veto timer armed untouched — it is not
-    # being disproven, just unobserved this poll.
-  else
-    # hook left 1 (0, or no hook state at all): a stale timer from an earlier
-    # turn must not survive into a new one, or the new turn's first poll can
-    # read a huge veto_age and clear @ccar_busy on a turn that just started.
+  # Age a hook-set 1 only while the pane is BOTH frozen and showing no spinner —
+  # the one state an Esc-interrupt or a kill -9 leaves behind. Any repaint means
+  # the turn is alive and resets the clock, so a long tool call (which paints its
+  # output where the spinner line would be) can no longer clear a live flag.
+  if [ "$hook" = 1 ] && [ "$att" = 1 ] && [ "$scrape" = 0 ] && [ "$frozen" = 1 ]; then
+    now="$(now_epoch)"
+    [ -n "${pane_hook_veto[$pr]:-}" ] || pane_hook_veto[$pr]=$now
+    veto_age=$(( now - pane_hook_veto[$pr] ))
+  elif [ "$att" = 1 ] || [ "$hook" != 1 ]; then
+    # Disproven (it repainted or the spinner is up), or the hook left 1 and a
+    # stale timer must not survive into the next turn. An unattached pane with
+    # hook=1 falls through both: its timer is unobserved, not disproven.
     unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
   fi
-  busy="$(decide_busy "$hook" "$scrape" "$veto_age")"
+  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age")"
   if [ "$busy" = 0 ] && [ "$hook" = 1 ] && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
-    log "pane $pr: hook flag stranded (Stop never fired?) — cleared @ccar_busy after ${veto_age}s of scrape disagreement"
+    log "pane $pr: hook flag stranded (Stop never fired?) — cleared @ccar_busy after ${veto_age}s frozen with no spinner"
     pane_hook_veto_logged[$pr]=1
   fi
   # Re-set every poll rather than only on a change: the option lives on the
@@ -1207,7 +1216,7 @@ scan_panes() {
     case "$live" in
       *$'\n'"$p"$'\n'*) ;;
       *)
-        unset 'pane_busy[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]'
+        unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]'
         rm -f "${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")" 2>/dev/null
         ;;
     esac

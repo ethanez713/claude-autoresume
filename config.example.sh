@@ -77,10 +77,12 @@ CCAR_POLL_SECONDS=15                   # how often to poll while watching
 # agent to finish") is past-tense-shaped exactly like the completion line.
 # Set empty to switch the indicator off.
 CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
-# How long the fallback colour scrape must keep disagreeing with a hook-set
-# "working" before the monitor assumes the session's Stop hook was lost
-# (Esc-interrupt, crash) and clears the flag. A scrape saying working at any
-# point before this resets the clock.
+# How long a pane must sit FROZEN with no spinner on screen, under a hook that
+# still says "working", before the monitor assumes the session's Stop hook was
+# lost (Esc-interrupt, crash) and clears the flag. Both conditions are required:
+# "no spinner" alone is not evidence of idleness, because a running tool call
+# paints its output where the spinner line would be. A repaint or a spinner at
+# any point before this resets the clock.
 CCAR_BUSY_STALE_SECONDS=20
 # What the window name renders as while a turn is running. Claude Code emits the
 # same title glyph (✳) idle or working, so we swap a LEADING ✳ for the current

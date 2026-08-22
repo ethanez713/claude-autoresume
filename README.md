@@ -166,15 +166,20 @@ into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
 flag stranded by a previous session in this pane, and tells the monitor hooks
 are live here), and `SessionEnd` (drops the pane's state entirely). Each writes
 a single `0`/`1` to a per-pane file in `CCAR_BUSY_DIR`, which the monitor reads
-via `read_hook_busy()` as the primary answer to "is a turn running right now" —
-an idle pane with hook state pays zero captures.
+via `read_hook_busy()`.
 
-The colour scrape below survives as the FALLBACK, for two jobs: driving a pane
-with no hook state (a claude not launched through ccar, or hooks not
-installed), and clearing a hook-set `1` that got stranded because `Stop` never
-fired (Esc-interrupt, crash, `kill -9`) — the scrape has to keep disagreeing for
-`CCAR_BUSY_STALE_SECONDS` (20s) before the monitor gives up on it, so a
-permission prompt answered mid-turn doesn't trip a false clear.
+Neither signal is trusted alone, because each is wrong in one direction. The
+scrape false-negatives constantly: while a tool call runs, the pane paints the
+tool's output where the spinner line would be, so "no spinner" is not evidence
+of idleness. The hook false-negatives too: no hook fires when a background-task
+notification (a finished subagent, a scheduled wake) resumes a session, so it
+can still read `0` from the last `Stop` on a turn that is genuinely running.
+
+So a visible spinner always wins, whatever the hook says; and a hook-set `1` is
+cleared only once the pane has held **byte-identical AND spinnerless** for
+`CCAR_BUSY_STALE_SECONDS` (20s) — the state an Esc-interrupt or a `kill -9`
+leaves behind, since a live turn repaints and a parked one does not. That is the
+same frozen-means-parked test `should_resume()` uses on the rate-limit path.
 
 **Detection keys on colour, not on the glyph or the wording.** A finished turn
 leaves a spinner-*shaped* line on screen — `✻ Cooked for 24m 49s` — so matching
