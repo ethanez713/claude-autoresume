@@ -48,11 +48,12 @@ declare -A pane_snap=()
 declare -A pane_snap_ok=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
+declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we published for its server
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
 poll_panes=""                     # the subset running claude
 stats_last_ts=0; stats_last_cpu=0; stats_polls=0; stats_frames=0
-declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its window-status format
+declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its formats
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
 # --- clock reconciliation ----------------------------------------------------
@@ -172,43 +173,64 @@ screen_shows_working() { # $1 = screen text WITH colour escapes (capture_ansi)
   [ -n "$1" ] && printf '%s\n' "$1" | grep -a -E -q "$CCAR_BUSY_REGEX"
 }
 
+# Splice $3 into whatever $2 already says on server $1, in place of the first of
+# the tokens $4... it contains — rewriting the token instead of overwriting the
+# option keeps any customisation the operator has, whatever this tmux's stock
+# format happens to be. Always re-derives from the value as it was BEFORE we ever
+# touched it, stashed on first patch: patching our own output is not reversible
+# (we can't recognise an older release's blob to strip it), so without the stash
+# an upgrade would need the operator to reset the option by hand.
+splice_format() { # $1=socket $2=option $3=replacement $4...=tokens it may replace
+  local socket="$1" opt="$2" repl="$3"; shift 3
+  local origkey="@ccar_orig_$opt" orig cur tok
+  orig="$(tmux -S "$socket" show-options -gv "$origkey" 2>/dev/null)"
+  if [ -z "$orig" ]; then
+    cur="$(tmux -S "$socket" show-options -gv "$opt" 2>/dev/null)" || return 1
+    case "$cur" in *@ccar_*)
+      tmux -S "$socket" set-option -gu "$opt" 2>/dev/null
+      cur="$(tmux -S "$socket" show-options -gv "$opt" 2>/dev/null)"
+      log "$opt on $socket carried an older ccar glyph format — reset to this tmux's default before re-patching" ;;
+    esac
+    orig="$cur"
+    tmux -S "$socket" set-option -g "$origkey" "$orig" 2>/dev/null
+  fi
+  for tok in "$@"; do
+    case "$orig" in *"$tok"*)
+      tmux -S "$socket" set-option -g "$opt" "${orig//"$tok"/$repl}" 2>/dev/null
+      return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # The glyph swap has to live on whichever tmux server the operator actually
 # attached to, which is theirs as often as it is the ccar fallback — so we patch
-# window-status-format in place rather than shipping it in tmux.conf. Rewriting
-# the #W already in the format (instead of overwriting the whole option) keeps
-# any customisation the operator has, and works whatever this tmux's stock
-# format happens to be.
+# the formats in place rather than shipping them in tmux.conf. Two of them: the
+# window list (per-window @ccar_busy), and the terminal title, which is the only
+# indicator visible from the taskbar and so tracks the whole server instead
+# (@ccar_any_busy). A title nobody pushes to the terminal can't sparkle, so
+# set-titles goes on too.
 install_busy_format() {
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local socket session key opt cur new orig origkey
+  local socket session key opt
   while IFS=$'\t' read -r socket session; do
     key="$socket"$'\t'"$session"
     [ -n "${busy_format_done[$key]:-}" ] && continue
     busy_format_done[$key]=1
     for opt in window-status-format window-status-current-format; do
-      # Always re-derive from the format as it was BEFORE we ever touched it,
-      # stashed on first patch. Patching our own output is not reversible — we
-      # can't recognise an older release's blob to strip it — so without this an
-      # upgrade would need the operator to reset the option by hand.
-      origkey="@ccar_orig_$opt"
-      orig="$(tmux -S "$socket" show-options -gv "$origkey" 2>/dev/null)"
-      if [ -z "$orig" ]; then
-        cur="$(tmux -S "$socket" show-options -gv "$opt" 2>/dev/null)" || continue
-        case "$cur" in *@ccar_busy*)
-          tmux -S "$socket" set-option -gu "$opt" 2>/dev/null
-          cur="$(tmux -S "$socket" show-options -gv "$opt" 2>/dev/null)"
-          log "$opt on $socket carried an older ccar glyph format — reset to this tmux's default before re-patching" ;;
-        esac
-        orig="$cur"
-        tmux -S "$socket" set-option -g "$origkey" "$orig" 2>/dev/null
-      fi
-      case "$orig" in
-        *'#W'*)               new="${orig//'#W'/$CCAR_BUSY_NAME_FORMAT}" ;;
-        *'#{window_name}'*)   new="${orig//'#{window_name}'/$CCAR_BUSY_NAME_FORMAT}" ;;
-        *) log "$opt on $socket names no window — leaving it alone; the working glyph will not show there"; continue ;;
-      esac
-      tmux -S "$socket" set-option -g "$opt" "$new" 2>/dev/null
+      splice_format "$socket" "$opt" "$CCAR_BUSY_NAME_FORMAT" '#W' '#{window_name}' \
+        || log "$opt on $socket names no window — leaving it alone; the working glyph will not show there"
     done
+    if [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ]; then
+      if splice_format "$socket" set-titles-string "$CCAR_BUSY_TITLE_FORMAT" '#T' '#{pane_title}'; then
+        if [ "$(tmux -S "$socket" show-options -gv set-titles 2>/dev/null)" != on ]; then
+          tmux -S "$socket" set-option -g set-titles on 2>/dev/null
+          log "turned set-titles on for $socket so the working glyph reaches the terminal tab"
+        fi
+      else
+        log "set-titles-string on $socket names no pane title — leaving it alone; the taskbar will not show working sessions"
+      fi
+    fi
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" 2>/dev/null  # so a busy window is never glyph-less before the first tick
   done < <(live_sessions)
 }
@@ -295,6 +317,29 @@ busy_sockets() { # sockets with at least one pane currently working
   done | sort -u
 }
 
+# Whether ANY pane on a server is working, published per server as @ccar_any_busy.
+# The terminal title has to ask that question rather than the per-window one: it
+# belongs to whichever pane is active, but the taskbar shows it whatever window
+# you happen to be looking at, so it speaks for the whole server or it lies.
+# Never call this from a command substitution — the change-tracking would be
+# written in the subshell and thrown away.
+publish_any_busy() {
+  [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ] || return 0
+  local p s
+  local -A any=()
+  for p in "${!pane_busy[@]}"; do
+    s="$(pr_socket "$p")"
+    [ "${any[$s]:-0}" = 1 ] || any[$s]="${pane_busy[$p]}"
+  done
+  for s in "${!any[@]}"; do
+    [ "${socket_any_busy[$s]:-}" = "${any[$s]}" ] && continue
+    socket_any_busy[$s]="${any[$s]}"
+    # A working server gets refreshed by the frame loop anyway; this call is what
+    # repaints the title of one that has just stopped working.
+    tmux -S "$s" set-option -g @ccar_any_busy "${any[$s]}" \; refresh-client -S 2>/dev/null
+  done
+}
+
 # The poll sleep, spent animating the spinner instead of idling. Claude's own
 # glyph cycle is the point — a working session should read the same in the window
 # list as it does in the pane. One batched tmux call per server per frame keeps
@@ -319,6 +364,7 @@ poll_sleep() {
   for ((i = 0; i < frames; i++)); do
     if [ $(( i % every )) -eq 0 ]; then
       [ "$i" -gt 0 ] && for p in "${!pane_busy[@]}"; do publish_busy "$p"; done
+      publish_any_busy
       socks="$(busy_sockets)"
     fi
     if [ -z "$socks" ]; then sleep "$nap"; continue; fi   # nothing working: idle out the rest
@@ -1068,6 +1114,13 @@ scan_panes() {
       fi
     fi
   done <<<"$poll_panes"
+  # A pane that dies mid-turn would otherwise stay "working" forever, animating a
+  # window that is gone and pinning the taskbar glyph on.
+  local live=$'\n'"$poll_panes"$'\n'
+  for p in "${!pane_busy[@]}"; do
+    case "$live" in *$'\n'"$p"$'\n'*) ;; *) unset 'pane_busy[$p]' ;; esac
+  done
+  publish_any_busy    # poll_sleep skips its own call when the animation is off
 }
 
 # Resume gate, evaluated per latched pane at reset time. Resume when:

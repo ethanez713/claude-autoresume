@@ -142,8 +142,10 @@ render with the wrong terminfo — attaches with `TERM=xterm-256color`
 
 The config also forwards Claude's terminal title (status emoji + session summary)
 to the outer terminal tab via `set-titles on` / `set-titles-string '#T'` — tmux
-otherwise swallows the app's OSC title into the pane title. (If Windows Terminal
-doesn't update, check the profile's "Suppress title changes" isn't enabled.)
+otherwise swallows the app's OSC title into the pane title. The monitor rewrites
+that title too, so the tab and the taskbar sparkle while any session works (see
+below). (If Windows Terminal doesn't update, check the profile's "Suppress title
+changes" isn't enabled.)
 
 ### Working-vs-idle glyph
 
@@ -180,6 +182,23 @@ puts in the title — the moon phases it ticks while a subagent runs — is left
 alone rather than having a spinner prepended to it, keeping dispatch
 distinguishable from a plain in-session turn.
 
+### The same glyph in the taskbar
+
+The window list only helps when you are looking at it. The terminal's own title —
+the tab, and the taskbar entry behind every other window — is all you can see of a
+session you walked away from, so the monitor splices `CCAR_BUSY_TITLE_FORMAT` into
+`set-titles-string` as well (turning `set-titles` on if it was off, since a title
+nobody pushes to the terminal can't sparkle).
+
+That title belongs to whichever pane is active, so it can't read the per-window
+`@ccar_busy`. It reads `@ccar_any_busy`, which the monitor sets per tmux *server*
+whenever **any** watched pane on it is working. So the taskbar sparkles while
+anything anywhere is running, whatever window you left in front — and a still
+`✳` there means nothing is running at all.
+
+The swap fires on the leading `✳` of the *pane* title (`#T`), the one Claude
+itself sets. A pane that isn't Claude has no `✳` to swap and stays as it is.
+
 Frames advance during the monitor's poll sleep: one batched `set-option ;
 refresh-client -S` per *server* per frame, not per working pane. When nothing is
 working it falls back to a plain sleep, so an all-idle box is exactly as quiet as
@@ -188,13 +207,15 @@ it was before. Raise `CCAR_BUSY_ANIM_MS` (default 400) to slow it down; set it t
 
 The format is patched on whichever tmux server your panes live on (yours as
 often as the `ccar` fallback), which is why it isn't shipped in this repo's
-`tmux.conf`. Only the `#W` / `#{window_name}` already in your format is
-rewritten, so any customisation survives; if your format names no window at all
-it logs a line and leaves it alone. The pre-patch value is stashed in
-`@ccar_orig_window-status-format`, so changing `CCAR_BUSY_NAME_FORMAT` and
-restarting the monitor re-derives from the original rather than patching a patch.
+`tmux.conf`. Only the token already in your format is rewritten — `#W` /
+`#{window_name}` in the window list, `#T` / `#{pane_title}` in the title — so any
+customisation survives; a format naming neither logs a line and is left alone.
+The pre-patch value is stashed in `@ccar_orig_<option>`, so changing
+`CCAR_BUSY_NAME_FORMAT` or `CCAR_BUSY_TITLE_FORMAT` and restarting the monitor
+re-derives from the original rather than patching a patch.
 
-Set `CCAR_BUSY_REGEX=""` to switch the whole thing off.
+Set `CCAR_BUSY_TITLE_FORMAT=""` to leave the terminal title alone, or
+`CCAR_BUSY_REGEX=""` to switch the whole thing off.
 
 ### Cost
 

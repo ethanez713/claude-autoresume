@@ -76,6 +76,14 @@ CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
 # distinguishable from a plain in-session turn. The monitor splices this into
 # window-status-format on whichever tmux server your panes live on.
 CCAR_BUSY_NAME_FORMAT='#{?#{&&:#{==:#{@ccar_busy},1},#{m:✳*,#{window_name}}},#{@ccar_spin}#{s|^✳||:#{window_name}},#{window_name}}'
+# The same swap for the terminal's own title — the tab, and the taskbar entry
+# that is all you can see of a session whose window isn't in front. That title
+# belongs to whichever pane is active, so it cannot key on the per-window
+# @ccar_busy; it reads @ccar_any_busy, which the monitor sets per tmux server
+# whenever ANY watched pane on that server is working. So a ✳ in the taskbar
+# means nothing anywhere is running. The monitor splices this into
+# set-titles-string (and turns set-titles on). Set empty to leave the title alone.
+CCAR_BUSY_TITLE_FORMAT='#{?#{&&:#{==:#{@ccar_any_busy},1},#{m:✳*,#{pane_title}}},#{@ccar_spin}#{s|^✳||:#{pane_title}},#{pane_title}}'
 # Frames for that spinner, cycled in order — Claude's own set, so the window list
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
