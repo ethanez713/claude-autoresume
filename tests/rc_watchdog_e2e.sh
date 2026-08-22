@@ -56,12 +56,16 @@ for p in "$idle_gone" "$idle_conn" "$busy"; do
   printf '%s\t%s\t%s\t%s\n' "$sock" rc "$p" "$tmp" \
     > "$CCAR_PANES_DIR/$(printf '%s' "$p" | tr -c 'a-zA-Z0-9' _)"
 done
+# rc_check reads the registry walk the main loop shares with every consumer
+# (poll_panes), so a bare call would scan nothing at all.
+poll() { refresh_poll_panes; rc_check; }
+
 pr_gone="$sock"$'\t'"$idle_gone"
 pr_conn="$sock"$'\t'"$idle_conn"
 pr_busy="$sock"$'\t'"$busy"
 
 echo "first sighting only arms the grace window"
-rc_check
+poll
 [ -n "${rc_missing_since[$pr_gone]:-}" ] && ok "disconnected pane armed"     || bad "disconnected pane armed"
 [ -z "${rc_missing_since[$pr_conn]:-}" ] && ok "connected pane left alone"   || bad "connected pane left alone"
 [ -n "${rc_missing_since[$pr_busy]:-}" ] && ok "busy disconnected pane armed" || bad "busy disconnected pane armed"
@@ -70,7 +74,7 @@ capture "$pr_gone" | grep -q -- '/remote-control' && bad "typed during the grace
 echo "after the grace window"
 sleep 2
 rc_last_check=0
-rc_check
+poll
 sleep 0.5
 capture "$pr_gone" | grep -q -- '/remote-control' && ok "idle pane received the reconnect command" || bad "idle pane received the reconnect command"
 [ "${rc_attempts[$pr_gone]:-0}" = 1 ] && ok "attempt counter advanced to 1" || bad "attempt counter advanced to 1 (got ${rc_attempts[$pr_gone]:-unset})"
@@ -83,7 +87,7 @@ capture "$pr_busy" | grep -q -- '/remote-control' && bad "typed into a REPAINTIN
 echo "backoff holds the pane off until it expires"
 rc_last_check=0
 before="$(capture "$pr_gone" | grep -c -- '/remote-control')"
-rc_check
+poll
 [ "$before" = "$(capture "$pr_gone" | grep -c -- '/remote-control')" ] \
   && ok "no second send inside the backoff window" || bad "no second send inside the backoff window"
 
@@ -93,7 +97,7 @@ tmux -S "$sock" respawn-pane -k -t "$idle_gone" \
   "clear; printf '❯${nb}\n──────────────────────\n%s\n' '$footer_connected'; cat"
 sleep 0.8
 rc_last_check=0
-rc_check
+poll
 [ -z "${rc_missing_since[$pr_gone]:-}" ] && ok "per-pane state cleared" || bad "per-pane state cleared"
 
 echo "a pane that disappears is forgotten"
@@ -101,7 +105,7 @@ tmux -S "$sock" kill-window -t busy 2>/dev/null
 rm -f "$CCAR_PANES_DIR"/*"$(printf '%s' "$busy" | tr -c 'a-zA-Z0-9' _)"
 sleep 0.4
 rc_last_check=0
-rc_check
+poll
 [ -z "${rc_missing_since[$pr_busy]:-}" ] && ok "dead pane's state dropped" || bad "dead pane's state dropped"
 
 printf '\n--- monitor.log ---\n'; cat "$CCAR_LOG"
