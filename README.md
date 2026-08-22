@@ -160,6 +160,22 @@ working session as Claude's own spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and
 3:🌒 notes              <- subagent dispatched
 ```
 
+**The signal is hook-driven, not scraped.** `./install.sh` writes four hooks
+into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
+`UserPromptSubmit` (a turn started), `Stop` (it ended), `SessionStart` (clears a
+flag stranded by a previous session in this pane, and tells the monitor hooks
+are live here), and `SessionEnd` (drops the pane's state entirely). Each writes
+a single `0`/`1` to a per-pane file in `CCAR_BUSY_DIR`, which the monitor reads
+via `read_hook_busy()` as the primary answer to "is a turn running right now" —
+an idle pane with hook state pays zero captures.
+
+The colour scrape below survives as the FALLBACK, for two jobs: driving a pane
+with no hook state (a claude not launched through ccar, or hooks not
+installed), and clearing a hook-set `1` that got stranded because `Stop` never
+fired (Esc-interrupt, crash, `kill -9`) — the scrape has to keep disagreeing for
+`CCAR_BUSY_STALE_SECONDS` (20s) before the monitor gives up on it, so a
+permission prompt answered mid-turn doesn't trip a false clear.
+
 **Detection keys on colour, not on the glyph or the wording.** A finished turn
 leaves a spinner-*shaped* line on screen — `✻ Cooked for 24m 49s` — so matching
 the glyph reads every parked session as working. What separates them is that

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# claude-autoresume busy-state hook — invoked by Claude Code's own hook system
+# (see install.sh §7) as the primary source for @ccar_busy, the per-pane "a turn
+# is running" flag the monitor animates in the window list and terminal title.
+# The event name arrives as $1 because we put it there in the settings.json
+# command string, not because Claude Code passes it. Claude Code pipes hook JSON
+# on stdin; we never read it.
+#
+# Runs synchronously, inline in the user's Claude session, on every
+# UserPromptSubmit/Stop/SessionStart/SessionEnd — so it must be silent and never
+# fail the hook: no stdout/stderr, always exit 0, whatever else goes wrong.
+set -euo pipefail
+trap 'exit 0' EXIT
+
+event="${1:-}"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="${CCAR_CONFIG:-$here/config.sh}"
+[ -f "$config" ] || exit 0
+# shellcheck source=/dev/null
+source "$config" 2>/dev/null
+
+# $TMUX is "<socket>,<pid>,<session-id>" (tmux's documented format) and
+# $TMUX_PANE is a %N pane id — both inherited from the claude process. Either
+# empty means claude is not in tmux, so there is no pane to flag.
+[ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || exit 0
+socket_path="${TMUX%%,*}"
+pane_id="$TMUX_PANE"
+
+# Same key convention as register_pane() in bin/cc-run, so the monitor's
+# read_hook_busy() derives an identical key from the paneref.
+key="$(printf '%s:%s' "$socket_path" "$pane_id" | tr -c 'A-Za-z0-9._-' '_')"
+# Default here, not just in config.example.sh: an existing install.sh never
+# overwrites a user's config.sh (see §3), so anyone who installed before this
+# knob existed has a config.sh without it — set -u would make that an unbound-
+# variable error, and the resulting empty path would resolve to "/$key".
+busy_dir="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}"
+state_file="$busy_dir/$key"
+
+write_state() { # $1 = 0|1
+  local tmp
+  umask 077
+  mkdir -p "$busy_dir" 2>/dev/null || return 0
+  chmod 700 "$busy_dir" 2>/dev/null
+  tmp="$busy_dir/.$key.$$"
+  printf '%s\t%s\n' "$1" "$(date +%s)" >"$tmp" 2>/dev/null || return 0
+  chmod 600 "$tmp" 2>/dev/null
+  mv -f "$tmp" "$state_file" 2>/dev/null
+}
+
+case "$event" in
+  UserPromptSubmit) write_state 1 ;;
+  Stop)              write_state 0 ;;
+  SessionStart)       write_state 0 ;;
+  SessionEnd)         rm -f "$state_file" 2>/dev/null ;;
+  *) ;;
+esac
+
+exit 0

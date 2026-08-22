@@ -30,6 +30,11 @@ CCAR_STATE_DIR="$HOME/.claude/autoresume"   # runtime state (0700). Holds state.
 # read by the monitor, so the monitor watches your panes across ANY tmux server
 # (your own socket and the ccar fallback alike). One file per pane avoids races.
 CCAR_PANES_DIR="$CCAR_STATE_DIR/panes"
+# Hook busy-state dir (0700): one file per pane, written by bin/cc-busy-hook on
+# every UserPromptSubmit/Stop/SessionStart/SessionEnd and read by the monitor's
+# read_hook_busy(). This is the primary @ccar_busy signal; see CCAR_BUSY_REGEX
+# below for the fallback.
+CCAR_BUSY_DIR="$CCAR_STATE_DIR/busy"
 
 # --- signal sources ----------------------------------------------------------
 # Authoritative reset time, written by the patched statusline.py (see PLAN.md §3a).
@@ -51,9 +56,13 @@ CCAR_DETECT_REGEX="(hit your (session|usage) limit|usage limit reached|session l
 # Measured on one box: 5s costs ~6.4% of a core, 15s ~3.3%. The working-glyph
 # indicator is NOT tied to this — see CCAR_BUSY_REFRESH_MS.
 CCAR_POLL_SECONDS=15                   # how often to poll while watching
-# Matched (grep -E) against a claude pane to decide "a turn is running right now",
-# published to tmux as the window option @ccar_busy so the window list can show a
-# working session differently from a parked one.
+# FALLBACK for @ccar_busy, the window option that says "a turn is running right
+# now" (see CCAR_BUSY_DIR above for the primary, hook-driven signal). This regex
+# now only drives panes with no hook state (a claude not launched through ccar,
+# or hooks not installed) and clears a hook-set 1 that got stranded because Stop
+# never fired (Esc-interrupt, crash, kill -9) — see CCAR_BUSY_STALE_SECONDS.
+#
+# Matched (grep -E) against a claude pane's captured colour output.
 #
 # This has to key on COLOUR, not on the glyph or the wording. A finished turn
 # leaves its own spinner-shaped line on screen — "✻ Cooked for 24m 49s" — so a
@@ -68,6 +77,11 @@ CCAR_POLL_SECONDS=15                   # how often to poll while watching
 # agent to finish") is past-tense-shaped exactly like the completion line.
 # Set empty to switch the indicator off.
 CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
+# How long the fallback colour scrape must keep disagreeing with a hook-set
+# "working" before the monitor assumes the session's Stop hook was lost
+# (Esc-interrupt, crash) and clears the flag. A scrape saying working at any
+# point before this resets the clock.
+CCAR_BUSY_STALE_SECONDS=20
 # What the window name renders as while a turn is running. Claude Code emits the
 # same title glyph (✳) idle or working, so we swap a LEADING ✳ for the current
 # spinner frame (@ccar_spin, advanced by the monitor). The #{m:✳*} guard means

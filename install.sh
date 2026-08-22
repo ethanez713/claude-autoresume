@@ -141,7 +141,79 @@ PY
 }
 patch_statusline
 
-# 6. The `claude` alias (interactive shells). Append once, with a marker, unless
+# 6. Hooks. bin/cc-busy-hook is the primary source for @ccar_busy — it writes a
+#    per-pane state file on the four turn-boundary events, which the monitor's
+#    colour scrape now only falls back to. Idempotent, keeps a .bak, fail-soft:
+#    it matches existing entries on the command string containing cc-busy-hook
+#    (so a moved repo path gets corrected in place, not duplicated) and leaves
+#    every other key and hook entry — the user's own SessionStart/PreToolUse/
+#    SubagentStop hooks among them — byte-for-byte untouched.
+patch_hooks() {
+  rc=0
+  CCAR_SETTINGS="$CLAUDE_DIR/settings.json" CCAR_HOOK_BIN="$here/bin/cc-busy-hook" \
+    python3 - <<'PY' || rc=$?
+import json, os
+
+path = os.environ["CCAR_SETTINGS"]
+hook_bin = os.environ["CCAR_HOOK_BIN"]
+events = ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd"]
+
+if not os.path.exists(path):
+    os.umask(0o077)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write("{}\n")
+
+with open(path) as f:
+    settings = json.load(f)
+
+bak = path + ".bak"
+if not os.path.exists(bak):
+    with open(path) as f:
+        src = f.read()
+    with open(bak, "w") as f:
+        f.write(src)
+
+hooks = settings.setdefault("hooks", {})
+changed = False
+for event in events:
+    entries = hooks.setdefault(event, [])
+    wanted = {"type": "command", "command": f"{hook_bin} {event}", "timeout": 5}
+    matched = False
+    for entry in entries:
+        for h in entry.get("hooks", []):
+            if "cc-busy-hook" in h.get("command", ""):
+                if h != wanted:
+                    h.clear()
+                    h.update(wanted)
+                    changed = True
+                matched = True
+    if not matched:
+        entries.append({"hooks": [wanted]})
+        changed = True
+
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+os.chmod(path, 0o600)
+
+if changed:
+    print("\033[32m✓\033[0m installed the busy-state hooks in %s (backup at %s.bak)" % (path, path))
+else:
+    print("\033[32m✓\033[0m busy-state hooks already installed in %s" % path)
+PY
+  if [ "$rc" -ne 0 ]; then
+    warn "could not patch $CLAUDE_DIR/settings.json with the busy-state hooks."
+    info "claude-autoresume still works via the on-screen-text fallback. Add the"
+    info "four hooks (UserPromptSubmit/Stop/SessionStart/SessionEnd -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
+  fi
+  return 0
+}
+patch_hooks
+
+# 7. The `claude` alias (interactive shells). Append once, with a marker, unless
 #    the user already aliases claude. Set CCAR_NO_ALIAS=1 to skip editing rc.
 if [ "${CCAR_NO_ALIAS:-0}" = "1" ]; then
   ok "skipped alias (CCAR_NO_ALIAS=1). Add manually: $ALIAS_LINE"

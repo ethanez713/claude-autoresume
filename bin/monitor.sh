@@ -49,6 +49,8 @@ declare -A pane_snap_ok=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we published for its server
+declare -A pane_hook_veto=()      # paneref -> epoch the scrape first disagreed with a hook-set 1
+declare -A pane_hook_veto_logged=() # paneref -> 1 once we've logged that pane's stranded flag
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
 poll_panes=""                     # the subset running claude
@@ -247,24 +249,100 @@ socket_attached() { # $1 = socket path; cached for the length of one scan
   [ "${attached[$s]}" = yes ]
 }
 
+# Same key convention as register_pane() in bin/cc-run and bin/cc-busy-hook, so
+# all three derive an identical key from one paneref/socket+pane pair.
+pane_key() { # $1 = paneref
+  printf '%s:%s' "$(pr_socket "$1")" "$(pr_pane "$1")" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# Primary @ccar_busy signal: the per-pane state bin/cc-busy-hook writes on every
+# UserPromptSubmit/Stop/SessionStart/SessionEnd. Echoes "0"/"1", or "" when
+# there is no hook state at all (missing file, unreadable, or garbage) — the
+# caller reads that as "no hook installed for this pane, fall back". Defaults
+# CCAR_BUSY_DIR the same way bin/cc-busy-hook does: an existing install.sh never
+# overwrites a user's config.sh, so an install from before this knob existed
+# has none, and set -u would make an unset reference here an error.
+read_hook_busy() { # $1 = paneref
+  local f state
+  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$1")"
+  [ -f "$f" ] || return 0
+  IFS=$'\t' read -r state _ <"$f" 2>/dev/null
+  case "$state" in
+    0|1) printf '%s' "$state" ;;
+  esac
+}
+
+# Pure decision for @ccar_busy, split out of publish_busy so it can be unit
+# tested with no tmux involved.
+#   $1 hook      = "0" | "1" | ""   (read_hook_busy)
+#   $2 scrape    = "0" | "1" | ""   (screen_shows_working result; "" means it was
+#                                     never attempted — hook said 0, or the
+#                                     server has no client attached)
+#   $3 veto_age  = seconds since the scrape first disagreed with a hook-set 1,
+#                  or "" while it has never disagreed
+# Echoes "0" or "1".
+decide_busy() {
+  local hook="$1" scrape="$2" veto_age="$3"
+  case "$hook" in
+    0) printf '0' ;;
+    1)
+      if [ "$scrape" = 1 ] || [ -z "$scrape" ]; then
+        printf '1'
+      elif [ -n "$veto_age" ] && [ "$veto_age" -ge "${CCAR_BUSY_STALE_SECONDS:-20}" ]; then
+        printf '0'    # scrape has disagreed long enough to assume Stop was lost
+      else
+        printf '1'
+      fi
+      ;;
+    *) [ "$scrape" = 1 ] && printf '1' || printf '0' ;;
+  esac
+}
+
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local busy=0
-  # With no client attached to this server nobody can see the window list, so the
-  # colour capture AND the animation it feeds are pure battery cost — and that is
-  # the normal state for the walked-away sessions this tool exists for. Reporting
-  # not-working parks the animation too, since poll_sleep ticks only for servers
-  # that have a working pane.
-  if socket_attached "$(pr_socket "$1")"; then
-    screen_shows_working "$(capture_ansi "$1")" && busy=1
+  local pr="$1" hook scrape="" att=0 busy now veto_age=""
+  hook="$(read_hook_busy "$pr")"
+  socket_attached "$(pr_socket "$pr")" && att=1
+  # hook==0 -> never scrape (the cost win: an idle session pays zero captures).
+  # hook==1 or "" -> scrape only when attached; nothing is visible on an
+  # unattached server, so the capture would be pure cost for no one to see.
+  if [ "$hook" != 0 ] && [ "$att" = 1 ]; then
+    if screen_shows_working "$(capture_ansi "$pr")"; then scrape=1; else scrape=0; fi
+  fi
+  # Track how long a hook-set 1 has disagreed with the scrape: this is what
+  # catches a Stop that never fired (Esc-interrupt, crash, kill -9). We do NOT
+  # clear the hook state file here — a later scrape agreeing flips it back to 1
+  # via the branch below, so a permission prompt answered mid-turn un-strands it.
+  if [ "$hook" = 1 ]; then
+    if [ "$att" = 1 ]; then
+      if [ "$scrape" = 1 ]; then
+        unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
+      else
+        now="$(now_epoch)"
+        [ -n "${pane_hook_veto[$pr]:-}" ] || pane_hook_veto[$pr]=$now
+        veto_age=$(( now - pane_hook_veto[$pr] ))
+      fi
+    fi
+    # not attached: leave any existing veto timer armed untouched — it is not
+    # being disproven, just unobserved this poll.
+  else
+    # hook left 1 (0, or no hook state at all): a stale timer from an earlier
+    # turn must not survive into a new one, or the new turn's first poll can
+    # read a huge veto_age and clear @ccar_busy on a turn that just started.
+    unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
+  fi
+  busy="$(decide_busy "$hook" "$scrape" "$veto_age")"
+  if [ "$busy" = 0 ] && [ "$hook" = 1 ] && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
+    log "pane $pr: hook flag stranded (Stop never fired?) — cleared @ccar_busy after ${veto_age}s of scrape disagreement"
+    pane_hook_veto_logged[$pr]=1
   fi
   # Re-set every poll rather than only on a change: the option lives on the
   # window, so moving/splitting/renumbering panes can strand a stale value that
   # a change-gated writer would never correct.
-  txp "$1" set-option -w -t "$(pr_pane "$1")" @ccar_busy "$busy" 2>/dev/null
-  [ "${pane_busy[$1]:-}" = "$busy" ] && return 0
-  pane_busy[$1]="$busy"
-  txp "$1" refresh-client -S 2>/dev/null   # repaint now instead of at the next status-interval
+  txp "$pr" set-option -w -t "$(pr_pane "$pr")" @ccar_busy "$busy" 2>/dev/null
+  [ "${pane_busy[$pr]:-}" = "$busy" ] && return 0
+  pane_busy[$pr]="$busy"
+  txp "$pr" refresh-client -S 2>/dev/null   # repaint now instead of at the next status-interval
 }
 
 # Cumulative CPU of the monitor AND every child it has reaped, in 10ms ticks.
@@ -310,10 +388,16 @@ busy_glyph() { # $1 = frame index (wraps)
   printf '%s' "${g[$(( $1 % ${#g[@]} ))]}"
 }
 
-busy_sockets() { # sockets with at least one pane currently working
-  local p
+busy_sockets() { # sockets with at least one pane working AND a client attached.
+  # A hook-only busy=1 on an unattached server is correct and free to publish,
+  # but nobody is looking at that window list — the socket_attached filter is
+  # what keeps the animation loop (spinner set-option + refresh-client every
+  # CCAR_BUSY_ANIM_MS) from spending real cost on a walked-away session.
+  local p s
   for p in "${!pane_busy[@]}"; do
-    [ "${pane_busy[$p]}" = 1 ] && { pr_socket "$p"; printf '\n'; }
+    [ "${pane_busy[$p]}" = 1 ] || continue
+    s="$(pr_socket "$p")"
+    socket_attached "$s" && printf '%s\n' "$s"
   done | sort -u
 }
 
@@ -1115,10 +1199,18 @@ scan_panes() {
     fi
   done <<<"$poll_panes"
   # A pane that dies mid-turn would otherwise stay "working" forever, animating a
-  # window that is gone and pinning the taskbar glyph on.
+  # window that is gone and pinning the taskbar glyph on. Also drop its hook
+  # state file: a kill -9'd claude never fires SessionEnd, so this prune loop is
+  # the only reaper for it.
   local live=$'\n'"$poll_panes"$'\n'
   for p in "${!pane_busy[@]}"; do
-    case "$live" in *$'\n'"$p"$'\n'*) ;; *) unset 'pane_busy[$p]' ;; esac
+    case "$live" in
+      *$'\n'"$p"$'\n'*) ;;
+      *)
+        unset 'pane_busy[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]'
+        rm -f "${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")" 2>/dev/null
+        ;;
+    esac
   done
   publish_any_busy    # poll_sleep skips its own call when the animation is off
 }
