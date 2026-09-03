@@ -158,8 +158,8 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 ```
 1:✽ adbconnect          <- running a turn
 2:✳ rotblock            <- idle at the prompt
-3:☾ notes               <- idle itself; its subagents are still working
-4:⏳ pyfin              <- parked at the limit, waiting for the window to reset
+3:◑ notes               <- idle itself; its subagents are still working
+4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
 ```
 
 **The signal is hook-driven, not scraped.** `./install.sh` writes six hooks
@@ -210,14 +210,13 @@ same as "nothing is happening":
   fired, so every busy signal reads idle; only the hook's subagent count knows
   otherwise. The pane's own subagent panel is no help: it paints a coloured
   spinner the scrape cannot tell apart from a turn of the main agent's own,
-  which is exactly why the count decides it. Rendered as the text moons
-  (`CCAR_SUBAGENT_GLYPHS`) — the same meaning as the emoji Claude itself ticks
-  while it dispatches an agent, but single-width, so the window list can't shift
-  a column under it.
+  which is exactly why the count decides it. Rendered as a phase cycle
+  (`CCAR_SUBAGENT_GLYPHS`, `○ ◑ ● ◐`) rather than a star one, so delegated work
+  reads as a different kind of activity and not just another busy session.
 * **Parked at the rate limit**, waiting for the window to reset — the pane the
   monitor is about to resume. It is a latch, not a reading, so it outranks every
   other signal: a turn cut off mid-flight never fires `Stop`, and its stranded
-  flag must not read as work. Static `⏳` (`CCAR_LIMIT_GLYPH`), because nothing
+  flag must not read as work. Static `⧗` (`CCAR_LIMIT_GLYPH`), because nothing
   is happening and that is the whole message.
 
 The result is published as the window option `@ccar_busy` — `1`, `sub`, `limit`

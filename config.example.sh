@@ -112,13 +112,15 @@ CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},1},
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
 CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
-# Frames for the subagent indicator, on the same clock. The text moons rather
-# than the emoji Claude itself ticks while it dispatches an agent: same meaning,
-# but single-width, so the window list can't shift a column under it.
-CCAR_SUBAGENT_GLYPHS='☽ ☾'
+# Frames for the subagent indicator, on the same clock — a phase cycle rather
+# than a star one, so delegated work reads as a different KIND of activity at a
+# glance and not just a different session. Single-width, unlike the emoji moons
+# Claude itself ticks while it dispatches an agent, so the window list can't
+# shift a column under it.
+CCAR_SUBAGENT_GLYPHS='○ ◑ ● ◐'
 # What a pane parked at the rate limit renders as until the monitor resumes it.
 # Static on purpose: nothing is happening, and that is the whole message.
-CCAR_LIMIT_GLYPH='⏳'
+CCAR_LIMIT_GLYPH='⧗'
 # Milliseconds per frame. Each frame costs ONE tmux call per server that has a
 # working pane (set-option + refresh-client, batched), so this is the knob to
 # raise if the animation ever shows up in CPU. 0 disables the animation and pins

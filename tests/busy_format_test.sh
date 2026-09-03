@@ -57,14 +57,14 @@ CCAR_BUSY_NAME_FORMAT="$(grep -o "^CCAR_BUSY_NAME_FORMAT=.*" "$CCAR_CONFIG" | cu
 
 echo "window name"
 tm set-option -g @ccar_spin '✽'
-tm set-option -g @ccar_sub_spin '☾'
-tm set-option -g @ccar_wait '⏳'
+tm set-option -g @ccar_sub_spin '◑'
+tm set-option -g @ccar_wait '⧗'
 tm set-option -w -t "$pane" @ccar_busy 1
 is "working: the leading ✳ becomes the current frame" '✽ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy sub
-is "subagents out: it becomes the subagent frame"     '☾ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "subagents out: it becomes the subagent frame"     '◑ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy limit
-is "parked at the limit: it becomes the hourglass"    '⏳ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "parked at the limit: it becomes the hourglass"    '⧗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
 is "parked: the name is untouched"                    '✳ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 1
@@ -77,9 +77,9 @@ tm set-option -w -t "$pane" @ccar_busy 0    # the title must ignore the per-wind
 tm set-option -g @ccar_any_busy 1
 is "any session working: the title sparkles"     '✽ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy sub
-is "only subagents left working: the title moons" '☾ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "only subagents left working: the title moons" '◑ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy limit
-is "everything parked at the limit: the taskbar waits" '⏳ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "everything parked at the limit: the taskbar waits" '⧗ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy 0
 is "nothing working: the title keeps its ✳"      '✳ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy 1

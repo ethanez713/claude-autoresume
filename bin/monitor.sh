@@ -238,7 +238,7 @@ install_busy_format() {
     # the frame loop never touches have their glyph from the start.
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
-      set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⏳}" 2>/dev/null
+      set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
   done < <(live_sessions)
 }
 
