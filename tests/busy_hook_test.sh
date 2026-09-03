@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Unit tests for the hook-driven @ccar_busy detector: read_hook_busy(),
-# decide_busy(), and bin/cc-busy-hook itself. No tmux, no real claude — the hook
-# is invoked with a fake $TMUX/$TMUX_PANE and read_hook_busy/decide_busy are
-# exercised directly against CCAR_BUSY_DIR. Run: tests/busy_hook_test.sh
+# read_hook_sub(), decide_busy(), and bin/cc-busy-hook itself. No tmux, no real
+# claude — the hook is invoked with a fake $TMUX/$TMUX_PANE and the readers and
+# decide_busy run directly against CCAR_BUSY_DIR. Run: tests/busy_hook_test.sh
 set -u
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -f "$repo/config.sh" ] && export CCAR_CONFIG="$repo/config.sh" \
@@ -38,6 +38,16 @@ printf 'garbage\n' >"$busy_dir/$key"
 eq "garbage contents -> empty" "" "$(read_hook_busy "$pr")"
 rm -f "$busy_dir/$key"
 
+echo "read_hook_sub"
+eq "no file -> no subagents"   "0" "$(read_hook_sub "$pr")"
+printf '0\t1700000000\n' >"$busy_dir/$key.sub"
+eq "count 0 -> no subagents"   "0" "$(read_hook_sub "$pr")"
+printf '2\t1700000000\n' >"$busy_dir/$key.sub"
+eq "count 2 -> subagents"      "1" "$(read_hook_sub "$pr")"
+printf 'garbage\n' >"$busy_dir/$key.sub"
+eq "garbage contents -> no subagents" "0" "$(read_hook_sub "$pr")"
+rm -f "$busy_dir/$key.sub"
+
 echo "bin/cc-busy-hook"
 # The hook sources config.sh fresh in its own subprocess, and config.sh assigns
 # CCAR_BUSY_DIR unconditionally — so pointing it at our mktemp dir needs a config
@@ -50,6 +60,7 @@ run_hook() { # $1 = event
     "$repo/bin/cc-busy-hook" "$1"
 }
 hook_state() { [ -f "$busy_dir/$key" ] && cut -f1 "$busy_dir/$key" || printf '(none)'; }
+sub_state()  { [ -f "$busy_dir/$key.sub" ] && cut -f1 "$busy_dir/$key.sub" || printf '(none)'; }
 
 rm -f "$busy_dir/$key"
 out="$(run_hook UserPromptSubmit 2>&1)"; rc=$?
@@ -62,16 +73,36 @@ eq "Stop: silent"   "" "$out"
 eq "Stop: exit 0"   "0" "$rc"
 eq "Stop: writes 0" "0" "$(hook_state)"
 
+out="$(run_hook SubagentStart 2>&1)"; rc=$?
+eq "SubagentStart: silent"       "" "$out"
+eq "SubagentStart: exit 0"       "0" "$rc"
+eq "SubagentStart: counts one"   "1" "$(sub_state)"
+run_hook SubagentStart
+eq "a second subagent is counted, not overwritten" "2" "$(sub_state)"
+
+out="$(run_hook SubagentStop 2>&1)"; rc=$?
+eq "SubagentStop: silent"        "" "$out"
+eq "SubagentStop: exit 0"        "0" "$rc"
+eq "SubagentStop: one still running" "1" "$(sub_state)"
+run_hook SubagentStop
+eq "the last one finishing clears the count" "0" "$(sub_state)"
+run_hook SubagentStop
+eq "a stop with nothing running cannot go negative" "0" "$(sub_state)"
+
 printf '1\t1700000000\n' >"$busy_dir/$key"
+printf '3\t1700000000\n' >"$busy_dir/$key.sub"
 out="$(run_hook SessionStart 2>&1)"; rc=$?
+eq "SessionStart: drops subagents stranded by the previous session" "(none)" "$(sub_state)"
 eq "SessionStart: silent"                    "" "$out"
 eq "SessionStart: exit 0"                    "0" "$rc"
 eq "SessionStart: clears a stranded 1 to 0"  "0" "$(hook_state)"
 
+printf '2\t1700000000\n' >"$busy_dir/$key.sub"
 out="$(run_hook SessionEnd 2>&1)"; rc=$?
 eq "SessionEnd: silent"          "" "$out"
 eq "SessionEnd: exit 0"          "0" "$rc"
 eq "SessionEnd: removes the file" "(none)" "$(hook_state)"
+eq "SessionEnd: removes the subagent count too" "(none)" "$(sub_state)"
 
 printf '1\t1700000000\n' >"$busy_dir/$key"
 out="$(run_hook SomeOtherEvent 2>&1)"; rc=$?
@@ -117,6 +148,23 @@ eq "hook=1, frozen and spinnerless, past threshold -> busy 0" \
 # pane_hook_veto so the next poll passes veto_age "".
 eq "a repaint resets the clock -> busy 1" "1" "$(decide_busy 1 0 0 '')"
 eq "a spinner resets the clock -> busy 1" "1" "$(decide_busy 1 1 1 '')"
+
+echo "decide_busy (subagents and the rate limit)"
+# Args: hook scrape frozen veto_age sub limited
+eq "main agent idle, subagents running -> sub" \
+   "sub" "$(decide_busy 0 0 0 '' 1 0)"
+eq "the subagent panel's own spinner is not a turn of the main agent's" \
+   "sub" "$(decide_busy 0 1 0 '' 1 0)"
+eq "a turn of its own takes the window back from its subagents" \
+   "1" "$(decide_busy 1 1 0 '' 1 0)"
+eq "frozen and spinnerless past the threshold strands a subagent flag too" \
+   "0" "$(decide_busy 0 0 1 45 1 0)"
+eq "under the threshold the subagent flag stands" \
+   "sub" "$(decide_busy 0 0 1 19 1 0)"
+eq "a rate-limit latch outranks a turn the interrupted hook never ended" \
+   "limit" "$(decide_busy 1 0 1 '' 0 1)"
+eq "a rate-limit latch outranks running subagents" \
+   "limit" "$(decide_busy 0 0 1 '' 1 1)"
 
 
 echo "read_hook_busy: falls back to \$CCAR_STATE_DIR/busy when CCAR_BUSY_DIR is unset"
@@ -173,6 +221,22 @@ publish_busy "$pr2"
 eq "new turn's first disagreeing poll is not immediately stale" "1" "${pane_busy[$pr2]:-}"
 eq "veto re-armed fresh for the new turn, not left dangling" "armed" "$(veto_state "$pr2")"
 rm -f "$busy_dir/$key2"
+
+echo "publish_busy: the state it publishes for each signal"
+pr3="state-sock"$'\t'"%3"; key3="$(pane_key "$pr3")"
+test_scrape_working=0; test_screen="frame-a"
+printf '0\t%s\n' "$(date +%s)" >"$busy_dir/$key3"        # main agent parked
+printf '2\t%s\n' "$(date +%s)" >"$busy_dir/$key3.sub"    # two subagents out
+publish_busy "$pr3"
+eq "idle main agent with subagents out -> sub" "sub" "${pane_busy[$pr3]:-}"
+printf '1\t%s\n' "$(date +%s)" >"$busy_dir/$key3"        # it starts a turn itself
+publish_busy "$pr3"
+eq "its own turn outranks its subagents"       "1"   "${pane_busy[$pr3]:-}"
+pane_latch[$pr3]=seen
+publish_busy "$pr3"
+eq "a rate-limit latch outranks both"          "limit" "${pane_busy[$pr3]:-}"
+unset 'pane_latch[$pr3]'
+rm -f "$busy_dir/$key3" "$busy_dir/$key3.sub"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

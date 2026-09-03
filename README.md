@@ -151,22 +151,26 @@ changes" isn't enabled.)
 
 Claude Code emits the same title glyph (`✳`) whether a session is parked at the
 prompt or burning tokens, so a window list of several sessions can't tell you
-which ones are actually running. The monitor closes that gap and renders a
-working session as Claude's own spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
+which ones are actually running. The monitor closes that gap and gives each pane
+the glyph of the state it is actually in — a working one gets Claude's own
+spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 
 ```
-1:✽ adbconnect          <- running
+1:✽ adbconnect          <- running a turn
 2:✳ rotblock            <- idle at the prompt
-3:🌒 notes              <- subagent dispatched
+3:🌔 notes              <- idle itself; its subagents are still working
+4:⏳ pyfin              <- parked at the limit, waiting for the window to reset
 ```
 
-**The signal is hook-driven, not scraped.** `./install.sh` writes four hooks
+**The signal is hook-driven, not scraped.** `./install.sh` writes six hooks
 into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
-`UserPromptSubmit` (a turn started), `Stop` (it ended), `SessionStart` (clears a
-flag stranded by a previous session in this pane, and tells the monitor hooks
-are live here), and `SessionEnd` (drops the pane's state entirely). Each writes
-a single `0`/`1` to a per-pane file in `CCAR_BUSY_DIR`, which the monitor reads
-via `read_hook_busy()`.
+`UserPromptSubmit` (a turn started), `Stop` (it ended), `SubagentStart` /
+`SubagentStop` (a subagent came or went), `SessionStart` (clears flags stranded
+by a previous session in this pane, and tells the monitor hooks are live here),
+and `SessionEnd` (drops the pane's state entirely). The first two write a single
+`0`/`1` to a per-pane file in `CCAR_BUSY_DIR`; the subagent pair keeps a count
+beside it, under an `flock` because a fan-out starts several in the same instant.
+The monitor reads both via `read_hook_busy()` and `read_hook_sub()`.
 
 Neither signal is trusted alone, because each is wrong in one direction. The
 scrape false-negatives constantly: while a tool call runs, the pane paints the
@@ -196,12 +200,30 @@ completion line. Re-derive the colour for another theme with:
 tmux capture-pane -pe -t <pane> | grep -aE $'^\033\[' | cat -v
 ```
 
-The result is published as the window option `@ccar_busy`, and the monitor
-patches `window-status-format` to swap a *leading* `✳` for the current frame
-(`@ccar_spin`). The swap only fires on a leading `✳`, so any other glyph Claude
-puts in the title — the moon phases it ticks while a subagent runs — is left
-alone rather than having a spinner prepended to it, keeping dispatch
-distinguishable from a plain in-session turn.
+### Waiting, and working through someone else
+
+Two more states share the same slot, because "not running a turn" is not the
+same as "nothing is happening":
+
+* **Subagents are still working** while the main agent is idle — the session
+  finished its turn and handed the job to agents that are still out. `Stop` has
+  fired, so every busy signal reads idle; only the hook's subagent count knows
+  otherwise. The pane's own subagent panel is no help: it paints a coloured
+  spinner the scrape cannot tell apart from a turn of the main agent's own,
+  which is exactly why the count decides it. Rendered as Claude's own moon
+  cycle (`CCAR_SUBAGENT_GLYPHS`), the glyph it ticks when it dispatches an agent
+  itself — so a moon means "subagents" wherever it shows up.
+* **Parked at the rate limit**, waiting for the window to reset — the pane the
+  monitor is about to resume. It is a latch, not a reading, so it outranks every
+  other signal: a turn cut off mid-flight never fires `Stop`, and its stranded
+  flag must not read as work. Static `⏳` (`CCAR_LIMIT_GLYPH`), because nothing
+  is happening and that is the whole message.
+
+The result is published as the window option `@ccar_busy` — `1`, `sub`, `limit`
+or `0` — and the monitor patches `window-status-format` to swap a *leading* `✳`
+for that state's glyph. The swap only fires on a leading `✳`, so any other glyph
+Claude puts in the title — the moon phases it ticks while it dispatches a
+subagent itself — is left alone rather than having ours prepended to it.
 
 ### The same glyph in the taskbar
 
@@ -213,15 +235,19 @@ nobody pushes to the terminal can't sparkle).
 
 That title belongs to whichever pane is active, so it can't read the per-window
 `@ccar_busy`. It reads `@ccar_any_busy`, which the monitor sets per tmux *server*
-whenever **any** watched pane on it is working. So the taskbar sparkles while
-anything anywhere is running, whatever window you left in front — and a still
-`✳` there means nothing is running at all.
+to the busiest state among its watched panes. Precedence there is deliberately
+not the per-window one — the taskbar answers "is anything still moving", so a
+running turn outranks working subagents, which outrank a parked pane. You get the
+spinner while anything anywhere is running, whatever window you left in front;
+the hourglass once the only thing left is a wait; and a still `✳` when nothing is
+happening at all.
 
 The swap fires on the leading `✳` of the *pane* title (`#T`), the one Claude
 itself sets. A pane that isn't Claude has no `✳` to swap and stays as it is.
 
 Frames advance during the monitor's poll sleep: one batched `set-option ;
-refresh-client -S` per *server* per frame, not per working pane. When nothing is
+refresh-client -S` per *server* per frame — both cycles in the same call — not
+per working pane. When nothing is
 working it falls back to a plain sleep, so an all-idle box is exactly as quiet as
 it was before. Raise `CCAR_BUSY_ANIM_MS` (default 400) to slow it down; set it to
 `0`, or list a single glyph in `CCAR_BUSY_GLYPHS`, for a static indicator.
@@ -272,7 +298,7 @@ it reaped, alongside the shape it was running against:
 
 ```json
 {"ts":"…","window_s":15,"cpu_ms":650,"cpu_pct":4.3,"polls":1,"frames":37,
- "registered":8,"claude":7,"busy":3,"servers_attached":1,"latched":0}
+ "registered":8,"claude":7,"busy":3,"sub":1,"servers_attached":1,"latched":0}
 ```
 
 It's a log, not a dashboard: nothing reads it automatically. The shape fields are

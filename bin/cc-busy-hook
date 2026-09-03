@@ -7,8 +7,9 @@
 # on stdin; we never read it.
 #
 # Runs synchronously, inline in the user's Claude session, on every
-# UserPromptSubmit/Stop/SessionStart/SessionEnd — so it must be silent and never
-# fail the hook: no stdout/stderr, always exit 0, whatever else goes wrong.
+# UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd — so
+# it must be silent and never fail the hook: no stdout/stderr, always exit 0,
+# whatever else goes wrong.
 set -euo pipefail
 trap 'exit 0' EXIT
 
@@ -36,23 +37,51 @@ key="$(printf '%s:%s' "$socket_path" "$pane_id" | tr -c 'A-Za-z0-9._-' '_')"
 # variable error, and the resulting empty path would resolve to "/$key".
 busy_dir="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}"
 state_file="$busy_dir/$key"
+# Running-subagent count for the same pane, kept beside the busy flag rather than
+# in it: the two are written by different events that can fire at the same
+# instant, and one file would make them clobber each other's field.
+sub_file="$state_file.sub"
+sub_lock="$busy_dir/.$key.sublock"
 
-write_state() { # $1 = 0|1
+write_field() { # $1 = path, $2 = value
   local tmp
   umask 077
   mkdir -p "$busy_dir" 2>/dev/null || return 0
   chmod 700 "$busy_dir" 2>/dev/null
-  tmp="$busy_dir/.$key.$$"
-  printf '%s\t%s\n' "$1" "$(date +%s)" >"$tmp" 2>/dev/null || return 0
+  tmp="$busy_dir/.$(basename "$1").$$"
+  printf '%s\t%s\n' "$2" "$(date +%s)" >"$tmp" 2>/dev/null || return 0
   chmod 600 "$tmp" 2>/dev/null
-  mv -f "$tmp" "$state_file" 2>/dev/null
+  mv -f "$tmp" "$1" 2>/dev/null
+}
+
+write_state() { write_field "$state_file" "$1"; }
+
+# A fan-out starts several subagents in the same instant, so read-modify-write
+# without a lock silently loses one of the increments and the pane then shows a
+# subagent that finished long ago. flock is best-effort: without it the count is
+# still right for the common one-at-a-time case.
+bump_subagents() { # $1 = 1 | -1
+  local n
+  mkdir -p "$busy_dir" 2>/dev/null || return 0
+  exec 9>"$sub_lock" 2>/dev/null || return 0
+  chmod 600 "$sub_lock" 2>/dev/null || true
+  command -v flock >/dev/null 2>&1 && flock -w 5 9 2>/dev/null || true
+  n="$(cut -f1 "$sub_file" 2>/dev/null || true)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$(( n + $1 ))
+  [ "$n" -lt 0 ] && n=0
+  write_field "$sub_file" "$n"
 }
 
 case "$event" in
   UserPromptSubmit) write_state 1 ;;
-  Stop)              write_state 0 ;;
-  SessionStart)       write_state 0 ;;
-  SessionEnd)         rm -f "$state_file" 2>/dev/null ;;
+  Stop)             write_state 0 ;;
+  SubagentStart)    bump_subagents 1 ;;
+  SubagentStop)     bump_subagents -1 ;;
+  # A session that died mid-turn, or with subagents still out, leaves this pane's
+  # flags stranded; a new session in it starts from a clean slate.
+  SessionStart)     write_state 0; rm -f "$sub_file" 2>/dev/null ;;
+  SessionEnd)       rm -f "$state_file" "$sub_file" "$sub_lock" 2>/dev/null ;;
   *) ;;
 esac
 

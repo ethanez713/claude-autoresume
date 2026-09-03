@@ -142,12 +142,13 @@ PY
 patch_statusline
 
 # 6. Hooks. bin/cc-busy-hook is the primary source for @ccar_busy — it writes a
-#    per-pane state file on the four turn-boundary events, which the monitor's
-#    colour scrape now only falls back to. Idempotent, keeps a .bak, fail-soft:
-#    it matches existing entries on the command string containing cc-busy-hook
-#    (so a moved repo path gets corrected in place, not duplicated) and leaves
-#    every other key and hook entry — the user's own SessionStart/PreToolUse/
-#    SubagentStop hooks among them — byte-for-byte untouched.
+#    per-pane state file on the turn boundaries and on every subagent start/stop,
+#    which the monitor's colour scrape now only falls back to. Idempotent, keeps
+#    a .bak, fail-soft: it matches existing entries on the command string
+#    containing cc-busy-hook (so a moved repo path gets corrected in place, not
+#    duplicated) and leaves every other key and hook entry — the user's own
+#    SessionStart/PreToolUse/Notification hooks among them — byte-for-byte
+#    untouched.
 patch_hooks() {
   rc=0
   CCAR_SETTINGS="$CLAUDE_DIR/settings.json" CCAR_HOOK_BIN="$here/bin/cc-busy-hook" \
@@ -156,7 +157,8 @@ import json, os
 
 path = os.environ["CCAR_SETTINGS"]
 hook_bin = os.environ["CCAR_HOOK_BIN"]
-events = ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd"]
+events = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
+          "SessionStart", "SessionEnd"]
 
 if not os.path.exists(path):
     os.umask(0o077)
@@ -207,7 +209,7 @@ PY
   if [ "$rc" -ne 0 ]; then
     warn "could not patch $CLAUDE_DIR/settings.json with the busy-state hooks."
     info "claude-autoresume still works via the on-screen-text fallback. Add the"
-    info "four hooks (UserPromptSubmit/Stop/SessionStart/SessionEnd -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
+    info "six hooks (UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
   fi
   return 0
 }

@@ -234,7 +234,11 @@ install_busy_format() {
         log "set-titles-string on $socket names no pane title — leaving it alone; the taskbar will not show working sessions"
       fi
     fi
-    tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" 2>/dev/null  # so a busy window is never glyph-less before the first tick
+    # So no window is ever glyph-less before the first frame tick, and the states
+    # the frame loop never touches have their glyph from the start.
+    tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
+      set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
+      set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⏳}" 2>/dev/null
   done < <(live_sessions)
 }
 
@@ -273,6 +277,20 @@ read_hook_busy() { # $1 = paneref
   esac
 }
 
+# Second hook signal for the same pane: how many subagents are running, kept by
+# bin/cc-busy-hook on SubagentStart/SubagentStop. Echoes "1" while at least one
+# is, else "0". The count is what makes "the main agent is idle but its subagents
+# are not" a decidable state — the pane's own subagent panel is a TUI element
+# with no text worth matching, and it paints a spinner the scrape cannot tell
+# apart from a turn of the main agent's own.
+read_hook_sub() { # $1 = paneref
+  local f n
+  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$1").sub"
+  [ -f "$f" ] || { printf '0'; return; }
+  IFS=$'\t' read -r n _ <"$f" 2>/dev/null
+  case "$n" in ''|0|*[!0-9]*) printf '0' ;; *) printf '1' ;; esac
+}
+
 # Pure decision for @ccar_busy, split out of publish_busy so it can be unit
 # tested with no tmux involved.
 #   $1 hook     = "0" | "1" | ""   (read_hook_busy; "" = no hook state for this pane)
@@ -281,40 +299,59 @@ read_hook_busy() { # $1 = paneref
 #   $3 frozen   = "0" | "1" | ""   (this pane's screen is byte-identical to the
 #                                    previous refresh; "" when unknown)
 #   $4 veto_age = seconds the pane has been BOTH frozen and scraping idle while
-#                 the hook says 1, or "" if that has not been true yet
-# Echoes "0" or "1".
+#                 a hook flag still says 1, or "" if that has not been true yet
+#   $5 sub      = "0" | "1"        (read_hook_sub: subagents are running)
+#   $6 limited  = "0" | "1"        (this pane carries a rate-limit latch)
+# Echoes the pane's state: "limit" (parked until the window resets), "1" (the
+# main agent is running a turn), "sub" (the main agent is idle, its subagents are
+# not) or "0" (idle).
 #
-# The two signals disagree in both directions, and each is authoritative in one:
+# The signals disagree in every direction, and each is authoritative somewhere:
 #
-#   scrape=1 always wins. Claude Code fires no hook when a background-task
-#   notification (a finished subagent, a scheduled wake) resumes a session, so
-#   the hook can still read 0 from the last Stop while a turn is genuinely
-#   running. Seeing the spinner is proof, whatever the hook says.
+#   limited wins outright. A paused pane is not working whatever its last hook
+#   said — a turn cut off mid-flight never fires Stop, so its flag stands there
+#   for the whole wait.
 #
 #   hook=1 outlives the scrape, because the scrape false-negatives constantly:
 #   while a tool call runs the pane paints its output instead of the spinner
 #   line, so "no spinner" is not evidence of idleness. Only a FROZEN screen is
 #   — a live turn repaints (the spinner ticks, the timer counts) and an
-#   interrupted one does not. So a hook-set 1 is cleared only after the pane has
+#   interrupted one does not. So a hook flag is cleared only after the pane has
 #   held still AND shown no spinner for CCAR_BUSY_STALE_SECONDS, which is what
 #   an Esc-interrupt or a kill -9 leaves behind. This is the same
 #   frozen-means-parked test should_resume() uses on the rate-limit path.
+#
+#   sub outranks the scrape, because the subagent panel paints a coloured
+#   spinner of its own that the scrape cannot tell apart from a turn of the main
+#   agent's. Only the count separates "thinking" from "waiting on its agents",
+#   and only a hook-set turn of its own takes the window back.
+#
+#   scrape=1 has the last word, and it is what carries a pane with no hooks at
+#   all: Claude Code fires none when a background-task notification (a finished
+#   subagent, a scheduled wake) resumes a session, so the hook can read 0 from
+#   the last Stop while a turn is genuinely running. Seeing the spinner is proof
+#   that something is.
 decide_busy() {
-  local hook="$1" scrape="$2" frozen="$3" veto_age="$4"
-  [ "$scrape" = 1 ] && { printf '1'; return; }
-  [ "$hook" = 1 ] || { printf '0'; return; }
-  [ "$frozen" = 1 ] || { printf '1'; return; }   # repainting, or nobody attached to look
-  if [ -n "$veto_age" ] && [ "$veto_age" -ge "${CCAR_BUSY_STALE_SECONDS:-20}" ]; then
-    printf '0'
-  else
-    printf '1'
+  local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" stale=0
+  [ "$limited" = 1 ] && { printf 'limit'; return; }
+  # A frozen, spinnerless pane has held still too long for any hook flag on it to
+  # still be true. Anything else — a repaint, or nobody attached to look — leaves
+  # the flags standing.
+  if [ "$frozen" = 1 ] && [ -n "$veto_age" ] && [ "$veto_age" -ge "${CCAR_BUSY_STALE_SECONDS:-20}" ]; then
+    stale=1
   fi
+  [ "$stale" = 0 ] && [ "$hook" = 1 ] && { printf '1'; return; }
+  [ "$stale" = 0 ] && [ "$sub" = 1 ] && { printf 'sub'; return; }
+  [ "$scrape" = 1 ] && { printf '1'; return; }
+  printf '0'
 }
 
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local pr="$1" hook scrape="" frozen="" att=0 busy now veto_age="" ansi shot
+  local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot
   hook="$(read_hook_busy "$pr")"
+  sub="$(read_hook_sub "$pr")"
+  [ -n "${pane_latch[$pr]:-}" ] && limited=1
   socket_attached "$(pr_socket "$pr")" && att=1
   # One capture per attached pane, as before the hooks existed — it answers both
   # "is the spinner up" and "did anything repaint". An unattached server is still
@@ -326,23 +363,24 @@ publish_busy() { # $1 = paneref
     if [ "$shot" = "${pane_busy_snap[$pr]:-}" ]; then frozen=1; else frozen=0; fi
     pane_busy_snap[$pr]="$shot"
   fi
-  # Age a hook-set 1 only while the pane is BOTH frozen and showing no spinner —
-  # the one state an Esc-interrupt or a kill -9 leaves behind. Any repaint means
-  # the turn is alive and resets the clock, so a long tool call (which paints its
-  # output where the spinner line would be) can no longer clear a live flag.
-  if [ "$hook" = 1 ] && [ "$att" = 1 ] && [ "$scrape" = 0 ] && [ "$frozen" = 1 ]; then
+  # Age a hook flag — a running turn or a running subagent — only while the pane
+  # is BOTH frozen and showing no spinner, the one state an Esc-interrupt or a
+  # kill -9 leaves behind. Any repaint means the work is alive and resets the
+  # clock, so a long tool call (which paints its output where the spinner line
+  # would be) can no longer clear a live flag.
+  if { [ "$hook" = 1 ] || [ "$sub" = 1 ]; } && [ "$att" = 1 ] && [ "$scrape" = 0 ] && [ "$frozen" = 1 ]; then
     now="$(now_epoch)"
     [ -n "${pane_hook_veto[$pr]:-}" ] || pane_hook_veto[$pr]=$now
     veto_age=$(( now - pane_hook_veto[$pr] ))
-  elif [ "$att" = 1 ] || [ "$hook" != 1 ]; then
-    # Disproven (it repainted or the spinner is up), or the hook left 1 and a
-    # stale timer must not survive into the next turn. An unattached pane with
-    # hook=1 falls through both: its timer is unobserved, not disproven.
+  elif [ "$att" = 1 ] || { [ "$hook" != 1 ] && [ "$sub" != 1 ]; }; then
+    # Disproven (it repainted or the spinner is up), or every flag has dropped and
+    # a stale timer must not survive into the next turn. An unattached pane with a
+    # flag still up falls through both: its timer is unobserved, not disproven.
     unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
   fi
-  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age")"
-  if [ "$busy" = 0 ] && [ "$hook" = 1 ] && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
-    log "pane $pr: hook flag stranded (Stop never fired?) — cleared @ccar_busy after ${veto_age}s frozen with no spinner"
+  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age" "$sub" "$limited")"
+  if [ "$busy" = 0 ] && { [ "$hook" = 1 ] || [ "$sub" = 1 ]; } && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
+    log "pane $pr: hook flag stranded (no Stop/SubagentStop?) — cleared @ccar_busy after ${veto_age}s frozen with no spinner"
     pane_hook_veto_logged[$pr]=1
   fi
   # Re-set every poll rather than only on a change: the option lives on the
@@ -374,14 +412,16 @@ stats_emit() {
   if [ "$stats_last_ts" -eq 0 ]; then stats_last_ts=$now; stats_last_cpu=$(cpu_ticks); return 0; fi
   [ $(( now - stats_last_ts )) -ge "$every" ] || return 0
   local wall=$(( now - stats_last_ts )) t; t=$(cpu_ticks)
-  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 att=0 k
+  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 sub=0 att=0 k
   pct10=$(( dcpu * 10 / wall ))          # ticks are 10ms, so ticks/second IS percent-of-core
-  for k in "${!pane_busy[@]}"; do [ "${pane_busy[$k]}" = 1 ] && busy=$(( busy + 1 )); done
+  for k in "${!pane_busy[@]}"; do
+    case "${pane_busy[$k]}" in 1) busy=$(( busy + 1 )) ;; sub) sub=$(( sub + 1 )) ;; esac
+  done
   for k in "${!attached[@]}";  do [ "${attached[$k]}" = yes ] && att=$(( att + 1 )); done
-  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"servers_attached":%d,"latched":%d}\n' \
+  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"sub":%d,"servers_attached":%d,"latched":%d}\n' \
     "$(date -Is)" "$wall" "$(( dcpu * 10 ))" "$(( pct10 / 10 ))" "$(( pct10 % 10 ))" \
     "$stats_polls" "$stats_frames" "$(count "$poll_registry")" "$(count "$poll_panes")" \
-    "$busy" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
+    "$busy" "$sub" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
   stats_last_ts=$now; stats_last_cpu=$t; stats_polls=0; stats_frames=0
   local max="${CCAR_STATS_MAX_BYTES:-262144}"
   if [ "$(stat -c%s "$CCAR_STATS_JSONL" 2>/dev/null || echo 0)" -gt "$max" ]; then
@@ -390,39 +430,46 @@ stats_emit() {
   fi
 }
 
-busy_glyph() { # $1 = frame index (wraps)
+busy_glyph() { # $1 = frame index (wraps), $2 = glyph list (default CCAR_BUSY_GLYPHS)
   local -a g
-  read -ra g <<<"${CCAR_BUSY_GLYPHS:-}"   # read never globs, so a bare * stays a glyph
+  read -ra g <<<"${2-${CCAR_BUSY_GLYPHS:-}}"   # read never globs, so a bare * stays a glyph
   [ "${#g[@]}" -gt 0 ] || return 0
   printf '%s' "${g[$(( $1 % ${#g[@]} ))]}"
 }
 
-busy_sockets() { # sockets with at least one pane working AND a client attached.
-  # A hook-only busy=1 on an unattached server is correct and free to publish,
-  # but nobody is looking at that window list — the socket_attached filter is
-  # what keeps the animation loop (spinner set-option + refresh-client every
-  # CCAR_BUSY_ANIM_MS) from spending real cost on a walked-away session.
+busy_sockets() { # sockets with a pane in an ANIMATED state AND a client attached.
+  # A hook-only flag on an unattached server is correct and free to publish, but
+  # nobody is looking at that window list — the socket_attached filter is what
+  # keeps the animation loop (spinner set-option + refresh-client every
+  # CCAR_BUSY_ANIM_MS) from spending real cost on a walked-away session. The
+  # limit glyph is static, so a parked pane needs no frames.
   local p s
   for p in "${!pane_busy[@]}"; do
-    [ "${pane_busy[$p]}" = 1 ] || continue
+    case "${pane_busy[$p]}" in 1|sub) ;; *) continue ;; esac
     s="$(pr_socket "$p")"
     socket_attached "$s" && printf '%s\n' "$s"
   done | sort -u
 }
 
-# Whether ANY pane on a server is working, published per server as @ccar_any_busy.
-# The terminal title has to ask that question rather than the per-window one: it
+# The busiest state on a server, published per server as @ccar_any_busy. The
+# terminal title has to ask that question rather than the per-window one: it
 # belongs to whichever pane is active, but the taskbar shows it whatever window
 # you happen to be looking at, so it speaks for the whole server or it lies.
+# Precedence is deliberately not the per-window one: there a limit is exclusive
+# truth about one pane, here the question is "is anything still moving", so live
+# work outranks a parked pane and the hourglass only reaches the taskbar once
+# nothing anywhere is running.
 # Never call this from a command substitution — the change-tracking would be
 # written in the subshell and thrown away.
 publish_any_busy() {
   [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ] || return 0
-  local p s
+  local p s state
   local -A any=()
+  local -A rank=([0]=0 [limit]=1 [sub]=2 [1]=3)
   for p in "${!pane_busy[@]}"; do
-    s="$(pr_socket "$p")"
-    [ "${any[$s]:-0}" = 1 ] || any[$s]="${pane_busy[$p]}"
+    s="$(pr_socket "$p")"; state="${pane_busy[$p]}"
+    [ -n "${any[$s]:-}" ] && [ "${rank[${any[$s]}]:-0}" -ge "${rank[$state]:-0}" ] && continue
+    any[$s]="$state"
   done
   for s in "${!any[@]}"; do
     [ "${socket_any_busy[$s]:-}" = "${any[$s]}" ] && continue
@@ -464,7 +511,9 @@ poll_sleep() {
     busy_frame=$(( busy_frame + 1 )); stats_frames=$(( stats_frames + 1 ))
     while IFS= read -r socket; do
       [ -n "$socket" ] || continue
-      tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; refresh-client -S 2>/dev/null
+      tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; \
+        set-option -g @ccar_sub_spin "$(busy_glyph "$busy_frame" "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
+        refresh-client -S 2>/dev/null
     done <<<"$socks"
     sleep "$nap"
   done
@@ -1164,7 +1213,7 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
 # merely displays the limit phrase (or quotes the choice menu) from triggering
 # key injection while the account is demonstrably not limited.
 scan_panes() {
-  local p scr ustate was
+  local p scr ustate was busy_file
   attached=()                # re-probe each scan: attaching must light the indicator back up
   refresh_state_cache        # main-shell context, so the mtime cache persists across polls
   ustate="$(usage_state)"
@@ -1217,7 +1266,8 @@ scan_panes() {
       *$'\n'"$p"$'\n'*) ;;
       *)
         unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]'
-        rm -f "${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")" 2>/dev/null
+        busy_file="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")"
+        rm -f "$busy_file" "$busy_file.sub" "$(dirname "$busy_file")/.$(basename "$busy_file").sublock" 2>/dev/null
         ;;
     esac
   done

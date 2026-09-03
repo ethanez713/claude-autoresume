@@ -84,26 +84,41 @@ CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
 # paints its output where the spinner line would be. A repaint or a spinner at
 # any point before this resets the clock.
 CCAR_BUSY_STALE_SECONDS=20
-# What the window name renders as while a turn is running. Claude Code emits the
-# same title glyph (✳) idle or working, so we swap a LEADING ✳ for the current
-# spinner frame (@ccar_spin, advanced by the monitor). The #{m:✳*} guard means
-# any other glyph it puts there — the moon phases it ticks while a subagent runs
-# — is left alone rather than having a spinner prepended to it, so dispatch stays
-# distinguishable from a plain in-session turn. The monitor splices this into
-# window-status-format on whichever tmux server your panes live on.
-CCAR_BUSY_NAME_FORMAT='#{?#{&&:#{==:#{@ccar_busy},1},#{m:✳*,#{window_name}}},#{@ccar_spin}#{s|^✳||:#{window_name}},#{window_name}}'
+# What the window name renders as, per pane state. Claude Code emits the same
+# title glyph (✳) whatever the session is doing, so we swap a LEADING ✳ for the
+# glyph of the state the monitor publishes in @ccar_busy:
+#   1      a turn is running                     -> @ccar_spin (current frame)
+#   sub    the main agent is idle, subagents are
+#          still working                         -> @ccar_sub_spin
+#   limit  parked at the rate limit, waiting for
+#          the window to reset                   -> @ccar_wait
+#   0      idle                                  -> ✳, i.e. unchanged
+# The #{m:✳*} guard means any other glyph Claude puts there — the moon phases it
+# ticks while it dispatches an agent itself — is left alone rather than having
+# ours prepended to it. The monitor splices this into window-status-format on
+# whichever tmux server your panes live on.
+CCAR_BUSY_NAME_FORMAT='#{?#{m:✳*,#{window_name}},#{?#{==:#{@ccar_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},✳}}}#{s|^✳||:#{window_name}},#{window_name}}'
 # The same swap for the terminal's own title — the tab, and the taskbar entry
 # that is all you can see of a session whose window isn't in front. That title
 # belongs to whichever pane is active, so it cannot key on the per-window
-# @ccar_busy; it reads @ccar_any_busy, which the monitor sets per tmux server
-# whenever ANY watched pane on that server is working. So a ✳ in the taskbar
-# means nothing anywhere is running. The monitor splices this into
-# set-titles-string (and turns set-titles on). Set empty to leave the title alone.
-CCAR_BUSY_TITLE_FORMAT='#{?#{&&:#{==:#{@ccar_any_busy},1},#{m:✳*,#{pane_title}}},#{@ccar_spin}#{s|^✳||:#{pane_title}},#{pane_title}}'
+# @ccar_busy; it reads @ccar_any_busy, the busiest state among the watched panes
+# on that tmux server. Live work ranks above a parked pane there, so the taskbar
+# sparkles while anything anywhere is running, shows the hourglass only when the
+# only thing left is a wait, and a ✳ still means nothing is happening at all. The
+# monitor splices this into set-titles-string (and turns set-titles on). Set
+# empty to leave the title alone.
+CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_any_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_any_busy},limit},#{@ccar_wait},✳}}}#{s|^✳||:#{pane_title}},#{pane_title}}'
 # Frames for that spinner, cycled in order — Claude's own set, so the window list
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
 CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
+# Frames for the subagent indicator, on the same clock — Claude's own moon cycle,
+# the one it ticks in the title while it dispatches an agent itself, so a moon
+# reads as "subagents" wherever it shows up.
+CCAR_SUBAGENT_GLYPHS='🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘'
+# What a pane parked at the rate limit renders as until the monitor resumes it.
+# Static on purpose: nothing is happening, and that is the whole message.
+CCAR_LIMIT_GLYPH='⏳'
 # Milliseconds per frame. Each frame costs ONE tmux call per server that has a
 # working pane (set-option + refresh-client, batched), so this is the knob to
 # raise if the animation ever shows up in CPU. 0 disables the animation and pins
