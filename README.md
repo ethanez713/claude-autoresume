@@ -158,7 +158,7 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 ```
 1:✽ adbconnect          <- running a turn
 2:✳ rotblock            <- idle at the prompt
-3:🌔 notes              <- idle itself; its subagents are still working
+3:☾ notes               <- idle itself; its subagents are still working
 4:⏳ pyfin              <- parked at the limit, waiting for the window to reset
 ```
 
@@ -210,9 +210,10 @@ same as "nothing is happening":
   fired, so every busy signal reads idle; only the hook's subagent count knows
   otherwise. The pane's own subagent panel is no help: it paints a coloured
   spinner the scrape cannot tell apart from a turn of the main agent's own,
-  which is exactly why the count decides it. Rendered as Claude's own moon
-  cycle (`CCAR_SUBAGENT_GLYPHS`), the glyph it ticks when it dispatches an agent
-  itself — so a moon means "subagents" wherever it shows up.
+  which is exactly why the count decides it. Rendered as the text moons
+  (`CCAR_SUBAGENT_GLYPHS`) — the same meaning as the emoji Claude itself ticks
+  while it dispatches an agent, but single-width, so the window list can't shift
+  a column under it.
 * **Parked at the rate limit**, waiting for the window to reset — the pane the
   monitor is about to resume. It is a latch, not a reading, so it outranks every
   other signal: a turn cut off mid-flight never fires `Stop`, and its stranded

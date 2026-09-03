@@ -112,10 +112,10 @@ CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},1},
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
 CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
-# Frames for the subagent indicator, on the same clock — Claude's own moon cycle,
-# the one it ticks in the title while it dispatches an agent itself, so a moon
-# reads as "subagents" wherever it shows up.
-CCAR_SUBAGENT_GLYPHS='🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘'
+# Frames for the subagent indicator, on the same clock. The text moons rather
+# than the emoji Claude itself ticks while it dispatches an agent: same meaning,
+# but single-width, so the window list can't shift a column under it.
+CCAR_SUBAGENT_GLYPHS='☽ ☾'
 # What a pane parked at the rate limit renders as until the monitor resumes it.
 # Static on purpose: nothing is happening, and that is the whole message.
 CCAR_LIMIT_GLYPH='⏳'
