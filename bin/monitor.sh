@@ -39,6 +39,13 @@ declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate
 #                         consecutive scans identical — a latch can fire while a
 #                         pane is still painting, and a snapshot of a moving
 #                         screen would make the gate see phantom "activity")
+#   pane_parked[paneref] = 1 once the pane has positive pause evidence and so
+#                         will be resumed: a seen latch always, a usage latch
+#                         only when the pause message is in its scrollback. This,
+#                         not the bare latch, drives the wait glyph — an idle
+#                         pane swept into a usage latch by account-wide usage is
+#                         latched (for resume safety) but not parked, so it keeps
+#                         its own idle/working glyph instead of the hourglass.
 # In-memory only: a restarted monitor re-derives latches from the pause screens,
 # which stay painted until something is sent to the pane.
 # (=() matters: bash 5.1 + set -u treats a declared-but-never-assigned array as
@@ -46,6 +53,7 @@ declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate
 declare -A pane_latch=()
 declare -A pane_snap=()
 declare -A pane_snap_ok=()
+declare -A pane_parked=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we published for its server
@@ -301,7 +309,11 @@ read_hook_sub() { # $1 = paneref
 #   $4 veto_age = seconds the pane has been BOTH frozen and scraping idle while
 #                 a hook flag still says 1, or "" if that has not been true yet
 #   $5 sub      = "0" | "1"        (read_hook_sub: subagents are running)
-#   $6 limited  = "0" | "1"        (this pane carries a rate-limit latch)
+#   $6 limited  = "0" | "1"        (this pane is parked at the limit — has pause
+#                                    evidence and will be resumed; a bare latch
+#                                    without that evidence does NOT count, so an
+#                                    idle pane swept into an account-usage latch
+#                                    keeps its own glyph)
 # Echoes the pane's state: "limit" (parked until the window resets), "1" (the
 # main agent is running a turn), "sub" (the main agent is idle, its subagents are
 # not) or "0" (idle).
@@ -351,7 +363,7 @@ publish_busy() { # $1 = paneref
   local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot
   hook="$(read_hook_busy "$pr")"
   sub="$(read_hook_sub "$pr")"
-  [ -n "${pane_latch[$pr]:-}" ] && limited=1
+  [ -n "${pane_parked[$pr]:-}" ] && limited=1
   socket_attached "$(pr_socket "$pr")" && att=1
   # One capture per attached pane, as before the hooks existed — it answers both
   # "is the spinner up" and "did anything repaint". An unattached server is still
@@ -1146,7 +1158,7 @@ refresh_poll_panes() {
 
 unlatch_pane() { # $1 = paneref
   local p="$1"
-  unset 'pane_latch[$p]' 'pane_snap[$p]' 'pane_snap_ok[$p]'
+  unset 'pane_latch[$p]' 'pane_snap[$p]' 'pane_snap_ok[$p]' 'pane_parked[$p]'
 }
 
 # Is the selection marker (❯) currently sitting on the "stop and wait" line?
@@ -1230,17 +1242,24 @@ scan_panes() {
     if [ "$ustate" != clear ] && dismiss_limit_prompt "$p" "$scr"; then
       [ "${pane_latch[$p]:-}" ] || log "rate-limit choice prompt on a pane — selected 'Stop and wait'; latched it as limited"
       pane_latch[$p]=seen
+      pane_parked[$p]=1                   # answered its own prompt — it will resume
       continue   # screen is mid-redraw; snapshot it on the next pass
     fi
     was="${pane_latch[$p]:-}"
     if [ "$ustate" != clear ] && screen_shows_limit "$scr"; then
       [ "$was" = seen ] || log "pane latched as limited (pause message on screen)"
       pane_latch[$p]=seen
+      pane_parked[$p]=1                   # pause message on its own screen — it will resume
       pane_snap[$p]="$(hash_of "$scr")"
       pane_snap_ok[$p]=1                  # snapshot of an actual pause screen — trusted
     elif [ "$ustate" = limited ] && [ -z "$was" ]; then
       log "pane latched as limited (account usage >= ${CCAR_LIMIT_PCT:-95}%)"
       pane_latch[$p]=usage
+      # Latched by account-wide usage alone. Only park it (and show the hourglass)
+      # if the pause message is actually in its scrollback — the same history test
+      # should_resume() gates a usage latch on. An idle pane that was never paused
+      # is latched for safety but stays unparked, so it keeps its own idle glyph.
+      history_shows_limit "$p" && pane_parked[$p]=1
       pane_snap[$p]="$(hash_of "$scr")"
       pane_snap_ok[$p]=0                  # provisional until the screen settles
     elif [ -n "$was" ] && [ "${pane_snap_ok[$p]:-0}" != 1 ]; then

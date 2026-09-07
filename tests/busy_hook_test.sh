@@ -232,10 +232,13 @@ eq "idle main agent with subagents out -> sub" "sub" "${pane_busy[$pr3]:-}"
 printf '1\t%s\n' "$(date +%s)" >"$busy_dir/$key3"        # it starts a turn itself
 publish_busy "$pr3"
 eq "its own turn outranks its subagents"       "1"   "${pane_busy[$pr3]:-}"
-pane_latch[$pr3]=seen
+pane_latch[$pr3]=usage
 publish_busy "$pr3"
-eq "a rate-limit latch outranks both"          "limit" "${pane_busy[$pr3]:-}"
-unset 'pane_latch[$pr3]'
+eq "an unparked usage latch keeps its own glyph" "1" "${pane_busy[$pr3]:-}"
+pane_parked[$pr3]=1
+publish_busy "$pr3"
+eq "a parked pane outranks both"               "limit" "${pane_busy[$pr3]:-}"
+unset 'pane_latch[$pr3]' 'pane_parked[$pr3]'
 rm -f "$busy_dir/$key3" "$busy_dir/$key3.sub"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
