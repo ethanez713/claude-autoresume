@@ -84,19 +84,19 @@ CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
 # paints its output where the spinner line would be. A repaint or a spinner at
 # any point before this resets the clock.
 CCAR_BUSY_STALE_SECONDS=20
-# What the window name renders as, per pane state. Claude Code emits the same
-# title glyph (✳) whatever the session is doing, so we swap a LEADING ✳ for the
-# glyph of the state the monitor publishes in @ccar_busy:
+# What the window name renders as, per pane state. A Claude pane's window name
+# carries a leading ✳ as an anchor (your automatic-rename-format puts it there —
+# see the README), and we swap that ✳ for the glyph of the state the monitor
+# publishes in @ccar_busy:
 #   1      a turn is running                     -> @ccar_spin (current frame)
 #   sub    the main agent is idle, subagents are
 #          still working                         -> @ccar_sub_spin
 #   limit  parked at the rate limit, waiting for
 #          the window to reset                   -> @ccar_wait
 #   0      idle                                  -> ✳, i.e. unchanged
-# The #{m:✳*} guard means any other glyph Claude puts there — the moon phases it
-# ticks while it dispatches an agent itself — is left alone rather than having
-# ours prepended to it. The monitor splices this into window-status-format on
-# whichever tmux server your panes live on.
+# The #{m:✳*} guard leaves any window without the anchor — a shell, an editor,
+# anything that isn't a Claude pane — exactly as it is. The monitor splices this
+# into window-status-format on whichever tmux server your panes live on.
 CCAR_BUSY_NAME_FORMAT='#{?#{m:✳*,#{window_name}},#{?#{==:#{@ccar_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},✳}}}#{s|^✳||:#{window_name}},#{window_name}}'
 # The same swap for the terminal's own title — the tab, and the taskbar entry
 # that is all you can see of a session whose window isn't in front. That title

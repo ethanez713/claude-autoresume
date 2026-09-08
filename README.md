@@ -162,6 +162,19 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
 ```
 
+**Give a Claude pane's window name a leading `✳`** — that anchor is what the
+monitor swaps for the state glyph, and naming windows is your tmux's job, not
+this repo's. In your `~/.tmux.conf`:
+
+```tmux
+set -g automatic-rename on
+set -g automatic-rename-format '#{?#{==:#{pane_current_command},claude},✳ ,}#{b:pane_current_path}'
+```
+
+Emit the anchor here rather than lifting it off the terminal title: Claude Code
+does put a `✳` in front of its title, but not on every pane in every state, and a
+window whose name is missing the anchor gets no glyph at all.
+
 **The signal is hook-driven, not scraped.** `./install.sh` writes six hooks
 into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
 `UserPromptSubmit` (a turn started), `Stop` (it ended), `SubagentStart` /
@@ -221,9 +234,9 @@ same as "nothing is happening":
 
 The result is published as the window option `@ccar_busy` — `1`, `sub`, `limit`
 or `0` — and the monitor patches `window-status-format` to swap a *leading* `✳`
-for that state's glyph. The swap only fires on a leading `✳`, so any other glyph
-Claude puts in the title — the moon phases it ticks while it dispatches a
-subagent itself — is left alone rather than having ours prepended to it.
+for that state's glyph. The swap only fires on that anchor, so a window without
+one — a shell, an editor, anything that isn't a Claude pane — is left exactly as
+it is rather than having a glyph prepended to it.
 
 ### The same glyph in the taskbar
 
