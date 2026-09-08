@@ -70,6 +70,7 @@ claude --resume       # claude's session picker
 # ...work normally; walk away. On a limit it waits + auto-resumes in place.
 # <prefix> then X     # stop retrying (cancel)   — <prefix> is YOUR tmux prefix
 #   ...or run `cc-cancel` from any shell to do the same.
+cc-attach             # get back to the fallback session (see below)
 ```
 
 Inside tmux, Claude takes over the current pane and your shell prompt returns when
@@ -105,6 +106,36 @@ tmux -L ccar ls                       # list the fallback session + windows
 tmux -L ccar kill-session -t cc       # end the fallback session
 ```
 
+### Getting back to the fallback session
+
+A detach costs you nothing — the server keeps running and `cc-attach` walks back
+in, with the same `TERM` override the launcher uses (a hand-rolled `tmux -L ccar
+attach` renders the TUI with the shell's `screen-256color` and garbles it).
+
+A reboot or a `wsl --shutdown` is different: tmux keeps no session state on disk,
+so the windows are gone for good. The conversations are not — Claude Code files
+those under `~/.claude/projects/` — and the pane registry outlives the server, so
+it still names every directory that had a window. `cc-attach` reads it, shows
+what it would reopen and which of those have a conversation to continue, and asks
+before it builds anything:
+
+```
+No tmux server on socket 'ccar' — session 'cc' is gone.
+
+Reopen 2 window(s):
+
+  1  /home/you/rotblock   claude -c — continues the last of 7 conversation(s)
+  2  /home/you/notes      claude — no saved conversation here, starts fresh
+
+Scrollback and any unsent input from the old session are not recoverable.
+
+Reopen 2 window(s)? [y/N]
+```
+
+`-y` skips the prompt. Panes you started inside your own tmux are listed in the
+same registry but are never reopened by this — it rebuilds the `ccar` fallback
+session and nothing else.
+
 ### Remote-control watchdog (opt-in)
 
 Claude Code's **Remote Control** already recovers from the disconnects you'd
@@ -128,6 +159,10 @@ indicator are skipped rather than guessed about, since Claude Code hides it ther
 tests/rc_watchdog_test.sh   # screen-reading helpers, no tmux
 tests/rc_watchdog_e2e.sh    # rc_check driven against scratch tmux panes
 ```
+
+Everything under `tests/` runs standalone and needs no account: the `_test.sh`
+files are pure functions, the `_e2e.sh` ones drive scratch tmux servers with a
+stub `claude` on `PATH`.
 
 ### Rendering
 

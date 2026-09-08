@@ -232,6 +232,32 @@ else
   info "open a new shell or run: source $BASHRC"
 fi
 
+# 8. Put the operator-facing commands on PATH. The alias covers cc-run; these two
+#    are run by hand from a plain shell — cc-attach in particular is how you get
+#    back to the fallback session after a reboot, when nothing else is running.
+link_commands() {
+  local bindir="$HOME/.local/bin" cmd target
+  case ":$PATH:" in
+    *":$bindir:"*) ;;
+    *)
+      warn "$bindir is not on PATH — run these by their full path, or add it:"
+      for cmd in cc-attach cc-cancel; do info "$here/bin/$cmd"; done
+      return 0 ;;
+  esac
+  mkdir -p "$bindir"
+  for cmd in cc-attach cc-cancel; do
+    target="$bindir/$cmd"
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
+      warn "$target exists and is not a symlink — left untouched."
+      continue
+    fi
+    ln -sfn "$here/bin/$cmd" "$target"
+    ok "linked $cmd ($target)"
+  done
+}
+link_commands
+
 echo
 echo "Done. Start a tmux window per project and run: claude"
-echo "Cancel a pending resume: your tmux prefix then X, or run bin/cc-cancel."
+echo "Cancel a pending resume: your tmux prefix then X, or run cc-cancel."
+echo "Get back to the fallback session after a reboot: cc-attach."
