@@ -13,6 +13,7 @@ eq()  { [ "$2" = "$3" ] && ok "$1" || { bad "$1"; printf '       want: %q\n     
 
 tmp="$(mktemp -d)"
 sock="ccar-e2e-$$"
+export TMUX_TMPDIR="$tmp"   # so the named socket lands under $tmp and goes with it
 cleanup() {
   local pidfile="$tmp/state/monitor.pid"
   [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
