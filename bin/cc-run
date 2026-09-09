@@ -92,14 +92,13 @@ fi
 # garble Claude's TUI.
 tx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
 
-# Reconnect flags. Only --continue reconnects to THIS dir's live window; bare
-# --resume always opens a fresh window with claude's session picker. Neither may
-# pin a --session-id (claude forbids combining it with continue/resume).
-continue_flag=0 reconnect=0
+# Reconnect flags: neither may pin a --session-id (claude forbids combining it
+# with continue/resume). Which invocations rejoin a window this directory already
+# has open is a separate question — see wants_rejoin.
+reconnect=0
 for arg in "$@"; do
   case "$arg" in
-    -c|--continue) continue_flag=1; reconnect=1 ;;
-    -r|--resume)   reconnect=1 ;;
+    -c|--continue|-r|--resume) reconnect=1 ;;
   esac
 done
 
@@ -149,6 +148,69 @@ run_in_window() {  # $1 = window id: tag it with this dir and launch claude in i
   register_pane "$sock" "$CCAR_TMUX_SESSION" "$wpane" "$PWD"  # monitor watches it too
 }
 
+# One row per window of the live session: its index, its directory, and what the
+# monitor last published about that pane.
+live_windows() {
+  local idx dir busy
+  while IFS=$'\t' read -r idx dir busy; do
+    printf '%s\t%s\t%s\n' "$idx" "${dir:-?}" "$(busy_label "$busy")"
+  done < <(tx list-windows -t "$CCAR_TMUX_SESSION" \
+             -F '#{window_index}'$'\t''#{@ccar_dir}'$'\t''#{@ccar_busy}' 2>/dev/null)
+}
+
+# Joining a running session and ending one are both far bigger than "open a
+# window" — the sessions listed may be mid-turn — so neither happens unasked.
+# Sets $join to `attach` or `fresh`.
+confirm_join() {
+  local rows=() row idx dir state width=0 reply
+  mapfile -t rows < <(live_windows)
+  if [ "${#rows[@]}" -eq 0 ]; then join=attach; return 0; fi
+
+  for row in "${rows[@]}"; do
+    dir="$(printf '%s' "$row" | cut -f2)"
+    [ "${#dir}" -gt "$width" ] && width="${#dir}"
+  done
+
+  printf "A wrapped session is already running on socket '%s':\n\n" "$CCAR_TMUX_SOCKET"
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r idx dir state <<<"$row"
+    if [ "$dir" = "$PWD" ]; then
+      printf '  %s  %-*s  %s   <- you are here\n' "$idx" "$width" "$dir" "$state"
+    else
+      printf '  %s  %-*s  %s\n' "$idx" "$width" "$dir" "$state"
+    fi
+  done
+  echo
+  if [ -n "$rejoin_win" ]; then
+    echo "  [Y] attach, on this directory's own window"
+  else
+    echo "  [Y] attach, and open a window for $PWD"
+  fi
+  printf '  [N] end that session — all %d window(s) above — and start over with just %s\n' \
+    "${#rows[@]}" "$PWD"
+  echo
+  read -r -p "Attach? [Y/n] " reply
+  case "$reply" in
+    [nN]|[nN][oO]) join=fresh ;;
+    *)             join=attach ;;
+  esac
+}
+
+# A live window for this directory only counts when the invocation is asking for
+# nothing it can't already give (see wants_rejoin).
+rejoin_win=""
+if tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
+  wants_rejoin "$@" && rejoin_win="$(dir_window)"
+  join=attach
+  confirm_join
+  if [ "$join" = fresh ]; then
+    tx kill-server 2>/dev/null || true
+    forget_dead_panes
+    rejoin_win=""
+    echo "Ended the previous session."
+  fi
+fi
+
 # Ensure the single account-wide session exists (its first window becomes ours).
 created=0
 if ! tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
@@ -157,9 +219,8 @@ if ! tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
   created=1
 fi
 
-if [ "$continue_flag" -eq 1 ] && [ "$created" -eq 0 ] && [ -n "$(dir_window)" ]; then
-  # --continue with a live window for this dir: reconnect to it in place.
-  win="$(dir_window)"
+if [ -n "$rejoin_win" ] && [ "$created" -eq 0 ]; then
+  win="$rejoin_win"
   tx select-window -t "$win"
   echo "Reconnecting to the live wrapped session for $PWD (window $win)."
 else

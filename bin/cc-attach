@@ -13,7 +13,7 @@ fi
 # shellcheck source=/dev/null
 source "$config"
 # shellcheck source=/dev/null
-source "$here/bin/ccar-lib.sh"   # register_pane, start_monitor
+source "$here/bin/ccar-lib.sh"   # register_pane, start_monitor, forget_dead_panes
 
 tx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
 
@@ -69,17 +69,6 @@ print_plan() { # $@ = dirs
   done
   echo
   echo "Scrollback and any unsent input from the old session are not recoverable."
-}
-
-# Rows for the dead server's panes name pane ids this rebuild hands out again, so
-# clearing them first keeps the monitor from watching a stale socket/pane pair.
-forget_dead_panes() {
-  local f socket
-  find "$CCAR_PANES_DIR" -maxdepth 1 -type f -print0 2>/dev/null |
-    while IFS= read -r -d '' f; do
-      IFS=$'\t' read -r socket _ <"$f" || continue
-      [ "$(basename -- "$socket")" = "$CCAR_TMUX_SOCKET" ] && rm -f "$f"
-    done
 }
 
 rebuild() { # $@ = dirs

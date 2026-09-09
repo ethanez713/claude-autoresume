@@ -64,6 +64,7 @@ alias claude="$HOME/claude-autoresume/bin/cc-run"
 
 ```bash
 claude                # inside tmux: runs in THIS pane (fresh convo, like native)
+                      # outside: shows the running session and asks before joining
 claude "fix the bug"  # args forwarded to the real claude
 claude -c             # continue this dir's last conversation
 claude --resume       # claude's session picker
@@ -76,7 +77,8 @@ cc-attach             # get back to the fallback session (see below)
 Inside tmux, Claude takes over the current pane and your shell prompt returns when
 it exits — so open a tmux window/tab per project and run `claude` in each. (When
 launched from a plain, non-tmux shell, it instead builds the private `ccar`
-fallback server and attaches; `<prefix> then d` detaches it, `claude -c` re-opens.)
+fallback server and attaches; `<prefix> then d` detaches it, and `claude` or
+`cc-attach` walks back in — see below.)
 
 ### Behaves like native `claude`
 
@@ -88,8 +90,9 @@ The alias is a transparent stand-in for the real CLI:
   session launch gets wrapped.
 - **Runs where you are.** Inside tmux, `claude` runs a fresh conversation in your
   current pane (native semantics — `claude` always starts fresh; use `-c` to
-  continue this dir's last convo). The fallback path opens one window per `$PWD`,
-  keyed to its dir via a `@ccar_dir` tmux option.
+  continue this dir's last convo). The fallback path keeps one window per `$PWD`,
+  keyed to its dir via a `@ccar_dir` tmux option, and rejoins that window rather
+  than stacking another on top of it.
 - **One account-wide monitor** watches every registered pane. Because the rate
   limit is per-account (all sessions pause together), on reset it resumes *all*
   paused panes, not just one.
@@ -106,11 +109,40 @@ tmux -L ccar ls                       # list the fallback session + windows
 tmux -L ccar kill-session -t cc       # end the fallback session
 ```
 
-### Getting back to the fallback session
+### Joining a session that is already running
 
-A detach costs you nothing — the server keeps running and `cc-attach` walks back
-in, with the same `TERM` override the launcher uses (a hand-rolled `tmux -L ccar
-attach` renders the TUI with the shell's `screen-256color` and garbles it).
+`claude` from a plain shell with a wrapped session already up shows you that
+session before it does anything to it — one row per window, its directory, and
+what the monitor says that pane is doing:
+
+```
+A wrapped session is already running on socket 'ccar':
+
+  1  /home/you/rotblock          idle   <- you are here
+  2  /home/you/notes             working
+  3  /home/you/spend-visualizer  parked at the rate limit
+
+  [Y] attach, on this directory's own window
+  [N] end that session — all 3 window(s) above — and start over with just /home/you/rotblock
+
+Attach? [Y/n]
+```
+
+`Y` (the default) attaches. Standing in a directory the session already has a
+window for, it takes you back to that window; anywhere else it opens one and
+launches Claude there first. An invocation the running window can't satisfy — a
+prompt to deliver, `--resume`, any other option — always gets its own window.
+
+`N` ends that whole session, running turns included, and starts over with a
+single window for where you are. It is the only destructive answer in this repo,
+which is why the state column is there: read it before you type.
+
+### Getting back after a reboot
+
+A detach costs you nothing — the server keeps running, and `cc-attach` walks back
+in without going through the prompt above, with the same `TERM` override the
+launcher uses (a hand-rolled `tmux -L ccar attach` renders the TUI with the
+shell's `screen-256color` and garbles it).
 
 A reboot or a `wsl --shutdown` is different: tmux keeps no session state on disk,
 so the windows are gone for good. The conversations are not — Claude Code files
