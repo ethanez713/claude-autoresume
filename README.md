@@ -339,10 +339,21 @@ often as the `ccar` fallback), which is why it isn't shipped in this repo's
 customisation survives; a format naming neither logs a line and is left alone.
 The pre-patch value is stashed in `@ccar_orig_<option>`, so changing
 `CCAR_BUSY_NAME_FORMAT` or `CCAR_BUSY_TITLE_FORMAT` and restarting the monitor
-re-derives from the original rather than patching a patch.
+re-derives from the original rather than patching a patch. The patch is gated on
+a per-server signature (`@ccar_fmt_sig`) of the current glyph config, not an
+in-memory flag: it lives and dies with the tmux server, so a `ccar` session
+rebuilt under a still-running monitor is re-patched on the next poll rather than
+coming up glyph-less.
 
 Set `CCAR_BUSY_TITLE_FORMAT=""` to leave the terminal title alone, or
 `CCAR_BUSY_REGEX=""` to switch the whole thing off.
+
+```bash
+tests/busy_hook_test.sh     # hook parsing + decide_busy, pure functions
+tests/busy_glyph_test.sh    # glyph-frame maths, pure functions
+tests/busy_format_test.sh   # format splicing + rendering, scratch tmux
+tests/busy_glyph_e2e.sh     # a real monitor.sh drives the tab, incl. re-patch after a rebuild
+```
 
 ### Cost
 
