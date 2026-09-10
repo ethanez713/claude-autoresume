@@ -48,12 +48,23 @@ is  "so does one whose subagents are working" \
     "$(busy_glyph 0 "$CCAR_SUBAGENT_GLYPHS")" "$(opt @ccar_sub_spin)"
 is  "the limit glyph is static, so it is published once" "$CCAR_LIMIT_GLYPH" "$(opt @ccar_wait)"
 
-# A second install (monitor restarted after a config change) must re-derive from
-# the stash, not patch its own output into a nested format.
-busy_format_done=(); CCAR_BUSY_NAME_FORMAT='<#{@ccar_busy}#{window_name}>'
+# A changed glyph config moves the per-server signature, so the next install
+# re-patches — re-deriving from the stash, not nesting its own output.
+CCAR_BUSY_NAME_FORMAT='<#{@ccar_busy}#{window_name}>'
 install_busy_format
-is "re-install re-derives from the stashed original" '#I:<#{@ccar_busy}#{window_name}>#F' "$(opt window-status-format)"
+is "a config change re-derives from the stashed original" '#I:<#{@ccar_busy}#{window_name}>#F' "$(opt window-status-format)"
 CCAR_BUSY_NAME_FORMAT="$(grep -o "^CCAR_BUSY_NAME_FORMAT=.*" "$CCAR_CONFIG" | cut -d"'" -f2)"
+
+# The bug this guards: a kill-server + rebuild from cc-run/cc-attach does not
+# restart an already-live monitor, so the rebuilt server starts with stock
+# formats while the monitor is mid-run. The gate lives on the server (@ccar_fmt_sig),
+# wiped with it, so the same in-process install must re-patch — an in-memory
+# "already done" flag would leave the working glyph gone for good.
+tm set-option -g window-status-format '#I:#W#F'
+tm set-option -gu @ccar_orig_window-status-format
+tm set-option -gu @ccar_fmt_sig
+install_busy_format
+has "a rebuilt server under a live monitor is re-patched" '@ccar_busy' "$(opt window-status-format)"
 
 echo "window name"
 tm set-option -g @ccar_spin '✽'

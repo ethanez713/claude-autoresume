@@ -64,7 +64,6 @@ busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while 
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
 poll_panes=""                     # the subset running claude
 stats_last_ts=0; stats_last_cpu=0; stats_polls=0; stats_frames=0
-declare -A busy_format_done=()    # "<socket>\t<session>" -> 1 once we've patched (or declined to patch) its formats
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
 # --- clock reconciliation ----------------------------------------------------
@@ -223,11 +222,20 @@ splice_format() { # $1=socket $2=option $3=replacement $4...=tokens it may repla
 # set-titles goes on too.
 install_busy_format() {
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local socket session key opt
+  local socket session opt sig
+  # What the formats would be spliced from right now. Stored per server so a
+  # single show-options tells us whether this server already carries THIS glyph
+  # config — the gate has to track the tmux server (where the patch lives), not
+  # the monitor process. An in-memory flag could not: a kill-server + rebuild
+  # from cc-run/cc-attach does not restart an already-live monitor, so the
+  # rebuilt server would start with stock formats while the monitor still
+  # believed it had patched, and the working glyph would never show. The rebuild
+  # wipes this option along with the format, so a mismatch (or an absent sig)
+  # re-applies; a changed CCAR_BUSY_* config after a monitor restart re-applies
+  # too, since the sig differs.
+  sig="$CCAR_BUSY_NAME_FORMAT"$'\n'"${CCAR_BUSY_TITLE_FORMAT:-}"
   while IFS=$'\t' read -r socket session; do
-    key="$socket"$'\t'"$session"
-    [ -n "${busy_format_done[$key]:-}" ] && continue
-    busy_format_done[$key]=1
+    [ "$(tmux -S "$socket" show-options -gv @ccar_fmt_sig 2>/dev/null)" = "$sig" ] && continue
     for opt in window-status-format window-status-current-format; do
       splice_format "$socket" "$opt" "$CCAR_BUSY_NAME_FORMAT" '#W' '#{window_name}' \
         || log "$opt on $socket names no window — leaving it alone; the working glyph will not show there"
@@ -247,6 +255,10 @@ install_busy_format() {
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
+    # Recorded even when a splice above found no anchor: a format that can't be
+    # patched must not be retried (and re-logged) every pass. A rebuild clears it
+    # with the server; a config change moves the sig, so either re-attempts once.
+    tmux -S "$socket" set-option -g @ccar_fmt_sig "$sig" 2>/dev/null
   done < <(live_sessions)
 }
 
