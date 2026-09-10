@@ -320,9 +320,12 @@ read_hook_sub() { # $1 = paneref
 #
 # The signals disagree in every direction, and each is authoritative somewhere:
 #
-#   limited wins outright. A paused pane is not working whatever its last hook
-#   said — a turn cut off mid-flight never fires Stop, so its flag stands there
-#   for the whole wait.
+#   limited wins over a stale hook flag but not over a live spinner. A pane
+#   parked at the limit is not working whatever its last hook said — a turn cut
+#   off mid-flight never fires Stop, so its flag stands there for the whole
+#   wait. But once the pane is visibly running again (a spinner on the live
+#   screen) it has been resumed and should_resume() will skip it at reset, so
+#   the hourglass would lie: the live scrape takes the window back.
 #
 #   hook=1 outlives the scrape, because the scrape false-negatives constantly:
 #   while a tool call runs the pane paints its output instead of the spinner
@@ -345,7 +348,12 @@ read_hook_sub() { # $1 = paneref
 #   that something is.
 decide_busy() {
   local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" stale=0
-  [ "$limited" = 1 ] && { printf 'limit'; return; }
+  # A parked pane keeps the hourglass only while it still looks parked. A live
+  # spinner means it was resumed and will not get a continue at reset (should_resume
+  # sees it repainting and skips it), so live activity takes the window back. Only
+  # the scrape overrides — a stale hook flag from an interrupted turn does not, and
+  # an unattached pane (scrape "") has no live signal, so it keeps the parked glyph.
+  [ "$limited" = 1 ] && [ "$scrape" != 1 ] && { printf 'limit'; return; }
   # A frozen, spinnerless pane has held still too long for any hook flag on it to
   # still be true. Anything else — a repaint, or nobody attached to look — leaves
   # the flags standing.

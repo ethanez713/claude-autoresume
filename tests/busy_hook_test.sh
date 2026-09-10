@@ -165,6 +165,10 @@ eq "a rate-limit latch outranks a turn the interrupted hook never ended" \
    "limit" "$(decide_busy 1 0 1 '' 0 1)"
 eq "a rate-limit latch outranks running subagents" \
    "limit" "$(decide_busy 0 0 1 '' 1 1)"
+eq "a live spinner takes the window back from a parked pane (resumed, no continue coming)" \
+   "1" "$(decide_busy 0 1 0 '' 0 1)"
+eq "an unattached parked pane (no live scrape) keeps the hourglass" \
+   "limit" "$(decide_busy 0 '' '' '' 0 1)"
 
 
 echo "read_hook_busy: falls back to \$CCAR_STATE_DIR/busy when CCAR_BUSY_DIR is unset"
