@@ -104,3 +104,92 @@ reconstruct_candidates() {
     printf '%s\n' "$dir"
   done < <(ls -1tr "$CCAR_PANES_DIR" 2>/dev/null) | awk '!seen[$0]++'
 }
+
+# --- interactive pick-list ---------------------------------------------------
+# One selection state transition, kept pure so it is testable with no terminal.
+# State is a cursor index and a string of one 0/1 flag per item ("selected").
+# Echoes the next state and an action: "<cursor> <sel> none|confirm|cancel".
+tui_apply_key() { # $1=n $2=cursor $3=sel $4=key
+  local n="$1" cur="$2" sel="$3" key="$4" action=none i out=""
+  case "$key" in
+    up)     cur=$(( (cur - 1 + n) % n )) ;;
+    down)   cur=$(( (cur + 1) % n )) ;;
+    toggle) for ((i = 0; i < n; i++)); do
+              if [ "$i" -eq "$cur" ]; then
+                [ "${sel:$i:1}" = 1 ] && out+=0 || out+=1
+              else out+="${sel:$i:1}"; fi
+            done; sel="$out" ;;
+    all)    sel=""; for ((i = 0; i < n; i++)); do sel+=1; done ;;
+    none)   sel=""; for ((i = 0; i < n; i++)); do sel+=0; done ;;
+    confirm) action=confirm ;;
+    cancel)  action=cancel ;;
+  esac
+  printf '%s %s %s' "$cur" "$sel" "$action"
+}
+
+# Read one keypress from fd 3 and map it to a tui_apply_key token. Arrow keys
+# arrive as a 3-byte escape sequence (ESC [ A/B); we read the tail only after
+# seeing ESC-[ so a lone ESC still reads as cancel.
+_tui_readkey() {
+  local a b c
+  IFS= read -rsn1 a <&3 || { printf 'cancel'; return; }
+  case "$a" in
+    $'\x1b') IFS= read -rsn1 -t 0.05 b <&3
+             if [ "$b" = '[' ]; then
+               IFS= read -rsn1 -t 0.05 c <&3
+               case "$c" in A) printf 'up' ;; B) printf 'down' ;; *) printf 'none' ;; esac
+             else printf 'cancel'; fi ;;
+    ' ')        printf 'toggle' ;;
+    k|K)        printf 'up' ;;
+    j|J)        printf 'down' ;;
+    a|A)        printf 'all' ;;
+    n|N)        printf 'none' ;;
+    q|Q)        printf 'cancel' ;;
+    ''|$'\r'|$'\n') printf 'confirm' ;;  # Enter: CR in raw mode, empty when read hits the newline delimiter
+    *)          printf 'none' ;;
+  esac
+}
+
+# Draw the list on the terminal (fd 3). After the first frame it rewinds the
+# cursor over its own output so each redraw lands in place.
+_tui_render() { # $1=n $2=cursor $3=sel $4=drawn-before(0/1); items in $tui_items
+  local n="$1" cur="$2" sel="$3" drawn="$4" i mark point
+  [ "$drawn" = 1 ] && printf '\033[%dA' "$((n + 2))" >&3
+  printf '\r\033[K  \033[1mReopen which sessions?\033[0m  ↑↓ move · space toggle · a all · n none · enter go · q cancel\n' >&3
+  for ((i = 0; i < n; i++)); do
+    [ "${sel:$i:1}" = 1 ] && mark='[\033[32mx\033[0m]' || mark='[ ]'
+    [ "$i" -eq "$cur" ] && point='\033[1m›\033[0m' || point=' '
+    printf '\r\033[K %b %b %s\n' "$point" "$mark" "${tui_items[$i]}" >&3
+  done
+  printf '\r\033[K\n' >&3
+}
+
+# Interactive multi-select. Items arrive one per line on stdin; the chosen ones
+# are printed one per line on stdout; return 1 if the user cancels. All items
+# start selected. With no controlling terminal (a pipe, cc-attach -y) it cannot
+# prompt, so it selects everything and returns 0.
+tui_multiselect() {
+  local -a tui_items=(); local line n cur=0 sel="" i tok action drawn=0 saved
+  while IFS= read -r line; do tui_items+=("$line"); done
+  n=${#tui_items[@]}
+  [ "$n" -gt 0 ] || return 1
+  for ((i = 0; i < n; i++)); do sel+=1; done
+  if ! { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf '%s\n' "${tui_items[@]}"; return 0
+  fi
+  saved="$(stty -g <&3 2>/dev/null)"
+  stty -echo -icanon <&3 2>/dev/null
+  printf '\033[?25l' >&3   # hide cursor
+  _tui_render "$n" "$cur" "$sel" "$drawn"; drawn=1
+  while :; do
+    tok="$(_tui_readkey)"
+    read -r cur sel action <<<"$(tui_apply_key "$n" "$cur" "$sel" "$tok")"
+    _tui_render "$n" "$cur" "$sel" "$drawn"
+    case "$action" in confirm|cancel) break ;; esac
+  done
+  printf '\033[?25h' >&3   # show cursor
+  [ -n "$saved" ] && stty "$saved" <&3 2>/dev/null
+  exec 3>&- 3<&-
+  [ "$action" = cancel ] && return 1
+  for ((i = 0; i < n; i++)); do [ "${sel:$i:1}" = 1 ] && printf '%s\n' "${tui_items[$i]}"; done
+}
