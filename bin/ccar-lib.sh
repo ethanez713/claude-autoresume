@@ -34,7 +34,11 @@ forget_dead_panes() {
   find "$CCAR_PANES_DIR" -maxdepth 1 -type f -print0 2>/dev/null |
     while IFS= read -r -d '' f; do
       IFS=$'\t' read -r socket _ <"$f" || continue
-      [ "$(basename -- "$socket")" = "$CCAR_TMUX_SOCKET" ] && rm -f "$f"
+      # An `if`, not `[ … ] && rm`: under `set -e` the &&-list returns non-zero on
+      # the last loop iteration whenever that row is NOT ours, and with pipefail
+      # that sinks the whole pipeline, failing every caller (rebuild_session,
+      # cc-run's fresh path) whenever a foreign row happens to sort last.
+      if [ "$(basename -- "$socket")" = "$CCAR_TMUX_SOCKET" ]; then rm -f "$f"; fi
     done
 }
 

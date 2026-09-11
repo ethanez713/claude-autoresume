@@ -199,7 +199,9 @@ confirm_join() {
 # A live window for this directory only counts when the invocation is asking for
 # nothing it can't already give (see wants_rejoin).
 rejoin_win=""
+had_session=0
 if tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
+  had_session=1
   wants_rejoin "$@" && rejoin_win="$(dir_window)"
   join=attach
   confirm_join
@@ -208,6 +210,38 @@ if tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
     forget_dead_panes
     rejoin_win=""
     echo "Ended the previous session."
+  fi
+fi
+
+# Server was gone at launch and this is a "take me back" invocation (bare claude
+# or -c/--continue; a prompt or a specific flag is a request for THIS directory,
+# not a restore): offer to reopen the Claude tabs that were open last session,
+# from any tmux server (see ccar-lib). Only when there is something beyond $PWD to
+# bring back, so a plain launch in a fresh directory is untouched. The picker's
+# reopened tabs each resume their last conversation where one exists; $PWD is
+# always reopened and focused. Cancelling falls through to a normal single window.
+if [ "$had_session" -eq 0 ] && wants_rejoin "$@"; then
+  recon_dirs=()
+  mapfile -t recon_dirs < <(reconstruct_candidates)
+  recon_other=0
+  for d in "${recon_dirs[@]}"; do [ "$d" != "$PWD" ] && recon_other=1; done
+  if [ "$recon_other" -eq 1 ]; then
+    have_pwd=0
+    for d in "${recon_dirs[@]}"; do [ "$d" = "$PWD" ] && have_pwd=1; done
+    [ "$have_pwd" -eq 1 ] || recon_dirs+=("$PWD")
+    echo "No wrapped session running — reopening the Claude tabs from your last session." >&2
+    echo "(Scrollback and any unsent input are not recoverable.)" >&2
+    if recon_sel="$(printf '%s\n' "${recon_dirs[@]}" | tui_multiselect)"; then
+      recon_chosen=()
+      while IFS= read -r d; do [ -n "$d" ] && recon_chosen+=("$d"); done <<<"$recon_sel"
+      have_pwd=0
+      for d in "${recon_chosen[@]}"; do [ "$d" = "$PWD" ] && have_pwd=1; done
+      [ "$have_pwd" -eq 1 ] || recon_chosen+=("$PWD")
+      rebuild_session "$PWD" "${recon_chosen[@]}"
+      attach_env=()
+      [ -n "${CCAR_OUTER_TERM:-}" ] && attach_env+=(TERM="$CCAR_OUTER_TERM")
+      exec env "${attach_env[@]}" tmux -L "$CCAR_TMUX_SOCKET" attach -t "$CCAR_TMUX_SESSION"
+    fi
   fi
 fi
 

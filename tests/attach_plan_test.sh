@@ -48,6 +48,13 @@ forget_dead_panes
 eq "clears only the rows whose pane ids a ccar rebuild reuses" \
    "$(ls "$CCAR_PANES_DIR" | tr '\n' ' ')" "foreign "
 
+# Under set -e + pipefail it must still return 0 when the last row processed is a
+# foreign one (its inner test is false) — else it sinks the whole caller.
+clear_rows
+row foreign1 /tmp/tmux-1000/default main %0 "$a"
+row foreign2 /tmp/tmux-1000/other   main %1 "$b"
+( set -euo pipefail; forget_dead_panes ); eq "survives set -e with only foreign rows" "$?" "0"
+
 echo
 echo "main"
 TMUX="/tmp/tmux-1000/default,1,0"
