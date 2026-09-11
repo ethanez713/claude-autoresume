@@ -91,18 +91,21 @@ transcript_count() { # $1 = dir; echoes how many .jsonl transcripts that dir has
 
 # Directories to reopen, one per line: every registry row whose pane is NOT still
 # live somewhere (so we never duplicate a tab a surviving server still shows),
-# whose directory still exists, deduped, oldest registration first so windows
-# come back roughly in the order they were opened.
+# whose directory still exists, deduped to one window each. Ordered by pane
+# number, which tmux hands out in sequence, so windows come back roughly in the
+# order they were opened (read as a number: a lexical sort puts %10 before %2).
+# Registry-file mtime can't do this — /tmp here has second-granularity mtimes, so
+# tabs opened in the same second would order arbitrarily.
 reconstruct_candidates() {
   local f socket session pane dir
   [ -d "$CCAR_PANES_DIR" ] || return 0
-  while IFS= read -r f; do
-    [ -e "$CCAR_PANES_DIR/$f" ] || continue
-    IFS=$'\t' read -r socket session pane dir <"$CCAR_PANES_DIR/$f" || continue
+  for f in "$CCAR_PANES_DIR"/*; do
+    [ -e "$f" ] || continue
+    IFS=$'\t' read -r socket session pane dir <"$f" || continue
     [ -n "$dir" ] && [ -d "$dir" ] || continue
     pane_is_live "$socket" "$pane" && continue
-    printf '%s\n' "$dir"
-  done < <(ls -1tr "$CCAR_PANES_DIR" 2>/dev/null) | awk '!seen[$0]++'
+    printf '%s\t%s\n' "${pane#%}" "$dir"
+  done | sort -n -k1,1 | awk -F'\t' '!seen[$2]++ { print $2 }'
 }
 
 # --- interactive pick-list ---------------------------------------------------
@@ -192,4 +195,49 @@ tui_multiselect() {
   exec 3>&- 3<&-
   [ "$action" = cancel ] && return 1
   for ((i = 0; i < n; i++)); do [ "${sel:$i:1}" = 1 ] && printf '%s\n' "${tui_items[$i]}"; done
+}
+
+# tmux on the ccar fallback socket.
+cx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
+
+# Build (or extend) the ccar fallback session with one window per directory, each
+# launching claude -c where a conversation exists there and a fresh claude
+# otherwise, then bind cancel, start the monitor, and focus $1's window (the
+# first window when $1 is empty or unmatched). Shared by cc-attach's rebuild and
+# cc-run's post-crash reopen. Does NOT attach — the caller does.
+rebuild_session() { # $1 = dir to focus; $2.. = dirs to open, in order
+  local focus="$1"; shift
+  local dir name win first_win="" focus_win="" pane sock cmd
+  umask 077
+  mkdir -p "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
+  chmod 700 "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
+  forget_dead_panes
+  for dir in "$@"; do
+    name="$(basename -- "$dir")"; [ -n "$name" ] || name="/"
+    if ! cx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
+      tmux -L "$CCAR_TMUX_SOCKET" -f "$CCAR_TMUX_CONF" \
+        new-session -d -s "$CCAR_TMUX_SESSION" -c "$dir" -n "$name"
+      win="$(cx display-message -p -t "$CCAR_TMUX_SESSION" '#{window_id}')"
+    else
+      win="$(cx new-window -P -F '#{window_id}' -t "$CCAR_TMUX_SESSION" -c "$dir" -n "$name")"
+    fi
+    [ -n "$first_win" ] || first_win="$win"
+    [ "$dir" = "$focus" ] && focus_win="$win"
+    cx set-option -w -t "$win" @ccar_dir "$dir"
+    # Creating a window with -n freezes automatic-rename for it, which would pin
+    # the static name and hide the live status glyph; restore the global setting.
+    if [ "$(cx show-options -gv automatic-rename 2>/dev/null)" = "on" ]; then
+      cx set-option -w -t "$win" automatic-rename on
+    fi
+    if [ "$(transcript_count "$dir")" -gt 0 ]; then cmd="exec claude -c"; else cmd="exec claude"; fi
+    pane="$(cx display-message -p -t "$win" '#{pane_id}')"
+    sock="$(cx display-message -p '#{socket_path}')"
+    cx send-keys -t "$pane" -l "$cmd"
+    cx send-keys -t "$pane" Enter
+    register_pane "$sock" "$CCAR_TMUX_SESSION" "$pane" "$dir"
+  done
+  [ -n "$first_win" ] || return 1   # nothing built
+  cx bind-key "$CCAR_CANCEL_KEY" run-shell "$here/bin/cc-cancel"
+  start_monitor
+  cx select-window -t "${focus_win:-$first_win}"
 }

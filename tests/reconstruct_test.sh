@@ -29,16 +29,16 @@ d1="$tmp/one"; d2="$tmp/two"; mkdir -p "$d1" "$d2"
 dead="$tmp/tmux-1000/gone"   # a socket path with no server behind it
 row() { printf '%s\t%s\t%s\t%s\n' "$1" cc "$2" "$3" > "$CCAR_PANES_DIR/$4"; }
 
-# Written oldest-first so the mtime order is deterministic; reconstruct returns
-# them in that order.
-row "$dead"    %0 "$d1"          r1; touch -d '2 hours ago'  "$CCAR_PANES_DIR/r1"
-row "$dead"    %1 "$d2"          r2; touch -d '1 hour ago'   "$CCAR_PANES_DIR/r2"
-row "$dead"    %2 "$d1"          r3; touch -d '30 min ago'   "$CCAR_PANES_DIR/r3"  # dup dir
-row "$dead"    %3 "$tmp/removed" r4; touch -d '20 min ago'   "$CCAR_PANES_DIR/r4"  # dir gone
-row "$live_sp" "$live_pane" "$live" r5; touch -d '10 min ago' "$CCAR_PANES_DIR/r5" # still open
+# Pane numbers are the open order; the result follows them, deduped to one window
+# per dir at the dir's earliest pane. A live pane and a gone directory are dropped.
+row "$dead"    %0 "$d1"          r1
+row "$dead"    %1 "$d2"          r2
+row "$dead"    %2 "$d1"          r3  # same dir again, later pane
+row "$dead"    %3 "$tmp/removed" r4  # dir gone
+row "$live_sp" "$live_pane" "$live" r5  # still open on a live server
 
 got="$(reconstruct_candidates | tr '\n' ',')"
-is "dead rows with existing dirs, deduped, oldest-first; live + gone-dir dropped" \
+is "dead rows with existing dirs, deduped, in pane order; live + gone-dir dropped" \
    "$got" "$d1,$d2,"
 
 echo

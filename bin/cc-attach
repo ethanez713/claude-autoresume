@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # claude-autoresume attach — reattach to the private `ccar` fallback session, or,
 # when its tmux server is gone (reboot, `wsl --shutdown`, a killed server),
-# rebuild it from the pane registry after showing what would be reopened.
+# reopen the Claude tabs that were open last session. `claude` itself now does
+# this on launch, so this stays as the explicit "just reattach/reopen" entry
+# point. The candidate directories, the pick-list, and the rebuild all live in
+# ccar-lib.sh, shared with cc-run.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,7 +16,7 @@ fi
 # shellcheck source=/dev/null
 source "$config"
 # shellcheck source=/dev/null
-source "$here/bin/ccar-lib.sh"   # register_pane, start_monitor, forget_dead_panes
+source "$here/bin/ccar-lib.sh"
 
 tx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
 
@@ -25,84 +28,19 @@ attach_session() {
   exec env "${attach_env[@]}" tmux -L "$CCAR_TMUX_SOCKET" attach -t "$CCAR_TMUX_SESSION"
 }
 
-# The registry outlives the tmux server (it is a directory of files, not server
-# state), so it still names every directory the dead session had a window for.
-# Rows are matched on the socket's NAME, not its path, because $TMUX_TMPDIR can
-# move between boots. One window per directory, in the order they were opened
-# (pane ids are handed out in sequence), skipping directories that are now gone.
-restore_dirs() {
-  local socket session pane dir
-  cat "$CCAR_PANES_DIR"/* 2>/dev/null | while IFS=$'\t' read -r socket session pane dir; do
-    [ "$(basename -- "$socket")" = "$CCAR_TMUX_SOCKET" ] || continue
-    [ "$session" = "$CCAR_TMUX_SESSION" ] || continue
-    [ -d "$dir" ] || continue
-    printf '%s\t%s\n' "${pane#%}" "$dir"
-  done | sort -n -k1,1 | awk -F'\t' '!seen[$2]++ { print $2 }'
-}
-
-# Claude Code files a conversation under a slug of its directory, every character
-# outside [A-Za-z0-9-] folded to a dash. No transcript there means `claude -c`
-# would fail, so such a window opens a fresh conversation instead.
-transcript_count() { # $1 = dir
-  local slug
-  slug="$(printf '%s' "$1" | tr -c 'A-Za-z0-9-' '-')"
-  set -- "$HOME/.claude/projects/$slug"/*.jsonl
-  if [ -e "$1" ]; then printf '%s' "$#"; else printf '0'; fi
-}
-
-# What the confirmation shows: one line per window, its directory, and whether
-# there is a conversation there to continue.
-print_plan() { # $@ = dirs
-  local width=0 dir i=0 n note
-  for dir in "$@"; do [ "${#dir}" -gt "$width" ] && width="${#dir}"; done
-  echo "Reopen $# window(s):"
-  echo
+# The non-interactive preview: one line per directory and whether it will
+# continue a conversation or start fresh. The interactive path shows the same
+# facts through the pick-list instead.
+preview_list() { # $@ = dirs
+  local dir n
   for dir in "$@"; do
-    i=$((i + 1))
     n="$(transcript_count "$dir")"
     if [ "$n" -gt 0 ]; then
-      note="claude -c — continues the last of $n conversation(s)"
+      printf '  %s  (claude -c — continues the last of %s)\n' "$dir" "$n"
     else
-      note="claude — no saved conversation here, starts fresh"
+      printf '  %s  (claude — no saved conversation, starts fresh)\n' "$dir"
     fi
-    printf '  %d  %-*s  %s\n' "$i" "$width" "$dir" "$note"
   done
-  echo
-  echo "Scrollback and any unsent input from the old session are not recoverable."
-}
-
-rebuild() { # $@ = dirs
-  local dir name win first_win="" pane sock cmd
-  umask 077
-  mkdir -p "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
-  chmod 700 "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
-  forget_dead_panes
-  for dir in "$@"; do
-    name="$(basename -- "$dir")"; [ -n "$name" ] || name="/"
-    if [ -z "$first_win" ]; then
-      tmux -L "$CCAR_TMUX_SOCKET" -f "$CCAR_TMUX_CONF" \
-        new-session -d -s "$CCAR_TMUX_SESSION" -c "$dir" -n "$name"
-      win="$(tx display-message -p -t "$CCAR_TMUX_SESSION" '#{window_id}')"
-      first_win="$win"
-    else
-      win="$(tx new-window -P -F '#{window_id}' -t "$CCAR_TMUX_SESSION" -c "$dir" -n "$name")"
-    fi
-    tx set-option -w -t "$win" @ccar_dir "$dir"
-    # Creating a window with -n freezes automatic-rename for it, which would pin
-    # the static name and hide the live status glyph. Same restore cc-run does.
-    if [ "$(tx show-options -gv automatic-rename 2>/dev/null)" = "on" ]; then
-      tx set-option -w -t "$win" automatic-rename on
-    fi
-    if [ "$(transcript_count "$dir")" -gt 0 ]; then cmd="exec claude -c"; else cmd="exec claude"; fi
-    pane="$(tx display-message -p -t "$win" '#{pane_id}')"
-    sock="$(tx display-message -p '#{socket_path}')"
-    tx send-keys -t "$pane" -l "$cmd"
-    tx send-keys -t "$pane" Enter
-    register_pane "$sock" "$CCAR_TMUX_SESSION" "$pane" "$dir"
-  done
-  tx bind-key "$CCAR_CANCEL_KEY" run-shell "$here/bin/cc-cancel"
-  start_monitor
-  tx select-window -t "$first_win"
 }
 
 usage() {
@@ -110,15 +48,16 @@ usage() {
 Usage: cc-attach [-y]
 
 Attaches to the '$CCAR_TMUX_SESSION' session on the private '$CCAR_TMUX_SOCKET'
-socket. If that server is gone, previews the windows it would reopen from the
-pane registry and asks before rebuilding them.
+socket. If that server is gone, reopens the Claude tabs that were open last
+session (across every tmux server, not just this one), letting you pick which in
+an arrow-key list first.
 
-  -y, --yes   rebuild without asking
+  -y, --yes   reopen them all without asking
 EOF
 }
 
 main() {
-  local arg assume_yes=0 reply
+  local arg assume_yes=0
   for arg in "$@"; do
     case "$arg" in
       -y|--yes)  assume_yes=1 ;;
@@ -137,33 +76,39 @@ main() {
     attach_session
   fi
 
-  local dirs=()
-  mapfile -t dirs < <(restore_dirs)
-  if [ "${#dirs[@]}" -eq 0 ]; then
-    echo "No server on socket '$CCAR_TMUX_SOCKET', and the pane registry names no"
+  local cands=()
+  mapfile -t cands < <(reconstruct_candidates)
+  if [ "${#cands[@]}" -eq 0 ]; then
+    echo "No server on socket '$CCAR_TMUX_SOCKET', and the registry names no"
     echo "directory to reopen ($CCAR_PANES_DIR)."
     echo "Start one with: cd <project> && claude"
     return 1
   fi
 
   echo "No tmux server on socket '$CCAR_TMUX_SOCKET' — session '$CCAR_TMUX_SESSION' is gone."
-  echo
-  print_plan "${dirs[@]}"
+  echo "Scrollback and any unsent input from the old session are not recoverable."
   echo
 
-  if [ "$assume_yes" -eq 0 ]; then
-    if [ ! -t 0 ]; then
-      echo "cc-attach: not a terminal — re-run with -y to rebuild without confirming." >&2
-      return 1
+  local chosen=()
+  if [ "$assume_yes" -eq 1 ]; then
+    echo "Reopening ${#cands[@]} window(s):"
+    preview_list "${cands[@]}"
+    chosen=("${cands[@]}")
+  elif [ ! -t 0 ]; then
+    echo "Would reopen ${#cands[@]} window(s):"
+    preview_list "${cands[@]}"
+    echo
+    echo "cc-attach: not a terminal — re-run with -y to reopen them without picking." >&2
+    return 1
+  else
+    mapfile -t chosen < <(printf '%s\n' "${cands[@]}" | tui_multiselect) \
+      || { echo "Cancelled — nothing was started."; return 1; }
+    if [ "${#chosen[@]}" -eq 0 ]; then
+      echo "Nothing selected — nothing was started."; return 1
     fi
-    read -r -p "Reopen ${#dirs[@]} window(s)? [y/N] " reply
-    case "$reply" in
-      [yY]|[yY][eE][sS]) ;;
-      *) echo "Cancelled — nothing was started."; return 1 ;;
-    esac
   fi
 
-  rebuild "${dirs[@]}"
+  rebuild_session "" "${chosen[@]}"
   attach_session
 }
 
