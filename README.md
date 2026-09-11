@@ -139,34 +139,38 @@ which is why the state column is there: read it before you type.
 
 ### Getting back after a reboot
 
-A detach costs you nothing — the server keeps running, and `cc-attach` walks back
-in without going through the prompt above, with the same `TERM` override the
-launcher uses (a hand-rolled `tmux -L ccar attach` renders the TUI with the
-shell's `screen-256color` and garbles it).
+A detach costs you nothing — the server keeps running, and either `claude` or
+`cc-attach` walks straight back in, with the same `TERM` override the launcher
+uses (a hand-rolled `tmux -L ccar attach` renders the TUI with the shell's
+`screen-256color` and garbles it).
 
 A reboot or a `wsl --shutdown` is different: tmux keeps no session state on disk,
-so the windows are gone for good. The conversations are not — Claude Code files
-those under `~/.claude/projects/` — and the pane registry outlives the server, so
-it still names every directory that had a window. `cc-attach` reads it, shows
-what it would reopen and which of those have a conversation to continue, and asks
-before it builds anything:
+so the windows are gone. The conversations are not — Claude Code files those
+under `~/.claude/projects/`, keyed by directory — and the pane registry outlives
+the server. The monitor drops a row the moment its pane closes, so what the
+registry holds when everything goes down is the set of Claude tabs that were
+open, across **every** tmux server, not just the `ccar` fallback (a conversation
+is keyed by its directory, so the server it used to live in does not matter).
+
+**There is nothing to remember about `claude` vs `cc-attach`.** A bare `claude`
+(or `claude -c`) from a plain shell, when the `ccar` server is gone and there are
+tabs to bring back, offers them in an arrow-key list — the directory you launched
+from included — and reopens the ones you keep:
 
 ```
-No tmux server on socket 'ccar' — session 'cc' is gone.
+No wrapped session running — reopening the Claude tabs from your last session.
+(Scrollback and any unsent input are not recoverable.)
 
-Reopen 2 window(s):
-
-  1  /home/you/rotblock   claude -c — continues the last of 7 conversation(s)
-  2  /home/you/notes      claude — no saved conversation here, starts fresh
-
-Scrollback and any unsent input from the old session are not recoverable.
-
-Reopen 2 window(s)? [y/N]
+  Reopen which sessions?  ↑↓ move · space toggle · a all · n none · enter go · q cancel
+ › [x] /home/you/rotblock
+   [x] /home/you/notes
+   [x] /home/you/chinese
 ```
 
-`-y` skips the prompt. Panes you started inside your own tmux are listed in the
-same registry but are never reopened by this — it rebuilds the `ccar` fallback
-session and nothing else.
+Each reopened tab continues its last conversation where one exists and starts
+fresh otherwise. Cancel (`q`) and you fall through to a plain single window.
+`cc-attach` does the same on its own — `-y` reopens everything without asking —
+and stays as the explicit "just reattach, or reopen" entry point.
 
 ### Remote-control watchdog (opt-in)
 

@@ -93,7 +93,17 @@ Three design decisions carry the whole thing:
   It's the contract between launcher and monitor: the monitor reads it (addressing
   each pane's server by socket *path* with `tmux -S`), so it follows panes across
   your own server and the `ccar` fallback. The monitor prunes a file when its pane
-  dies and exits once none remain (`CCAR_IDLE_EXIT_SECONDS` grace).
+  dies and exits once none remain (`CCAR_IDLE_EXIT_SECONDS` grace). Because it is
+  pruned to the live set, when the server dies with the monitor (reboot,
+  `wsl --shutdown`, crash) the registry freezes at the tabs that were open — the
+  source for reopening them.
+
+- **`bin/cc-attach`** and reopen-after-a-lost-server — when the `ccar` server is
+  gone, `reconstruct_candidates` (in `ccar-lib.sh`) reads the registry for every
+  directory whose pane is no longer live anywhere, `tui_multiselect` offers them
+  in an arrow-key pick-list, and `rebuild_session` reopens the chosen ones (one
+  window each, `claude -c` where a transcript exists). A bare `claude` from a
+  plain shell runs the same flow, so `cc-attach` is just the explicit entry point.
 
 - **`bin/cc-cancel`** — `touch`es `$CCAR_STATE_DIR/cancel`. Works two ways: run it
   directly from any shell, or press the bound chord (**your prefix then `X`** —
