@@ -181,15 +181,21 @@ every session connects itself, including panes the monitor resumes; the bridge
 also rebuilds its own transport after a laptop sleep or a network blip.
 
 What none of that covers is the state *after* Claude Code's internal recovery is
-exhausted: the `/rc active` indicator vanishes from the footer and its own advice
-is to run `/remote-control` again by hand — which nobody does at 3am. Set
-`CCAR_RC_ENABLE=1` and the monitor re-types that command for you, and nothing
-else. It only ever types into a pane it can prove is idle: an input box that is
-present and **empty**, a screen byte-identical two seconds apart (a session
-mid-turn repaints its timer every second), no rate-limit UI, and no rate limit
-latched. Attempts back off per pane (1, 2, 4, 8, 16, 30, 60 minutes, then hold),
-and any sighting of the indicator resets that. Panes too narrow to fit the
-indicator are skipped rather than guessed about, since Claude Code hides it there.
+exhausted: the footer badge reads `/rc failed` and its own advice is to run
+`/remote-control` again by hand — which nobody does at 3am. Set `CCAR_RC_ENABLE=1`
+and the monitor re-types that command for you, and nothing else. The badge is the
+only observable surface of the bridge (its state lives in memory, not in any file
+or the status-line JSON), so the watchdog reads it precisely: **only `/rc failed`
+triggers a reconnect.** `/rc active` — or the bare `/rc` it collapses to after a
+few views — means connected; `/rc reconnecting` and `/rc connecting…` mean Claude
+Code is already recovering; and *no badge at all* is the normal look of an
+outbound-only pane (reachable from your phone but with no interactive bridge), a
+disabled one, or one narrower than Claude Code's 60-column cutoff — none of which
+is a failure. It only ever types into a pane it can prove is idle: an input box
+that is present and **empty**, a screen byte-identical two seconds apart (a
+session mid-turn repaints its timer every second), no rate-limit UI, and no rate
+limit latched. Attempts back off per pane (1, 2, 4, 8, 16, 30, 60 minutes, then
+hold), and the bridge leaving the failed state resets that.
 
 ```bash
 tests/rc_watchdog_test.sh   # screen-reading helpers, no tmux

@@ -32,7 +32,8 @@ bad() { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 
 nb=$'\xc2\xa0'   # Claude Code pads an empty input line with U+00A0, not a space
 footer_connected="  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj                            /rc"
-footer_gone="  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj"
+footer_failed="  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj                     /rc failed"
+footer_transient="  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj              /rc reconnecting"
 
 make_pane() { # $1 = window name, $2 = footer line, $3 = optional body command
   local name="$1" footer="$2" body="${3:-}" id
@@ -47,12 +48,13 @@ make_pane() { # $1 = window name, $2 = footer line, $3 = optional body command
 tmux -S "$sock" -f /dev/null new-session -d -s rc -x 130 -y 20 'sleep 300'
 sleep 0.4
 
-idle_gone="$(make_pane gone "$footer_gone")"
+idle_failed="$(make_pane failed "$footer_failed")"
 idle_conn="$(make_pane conn "$footer_connected")"
+idle_trans="$(make_pane trans "$footer_transient")"
 # A pane that repaints every second, exactly like a session mid-turn.
-busy="$(make_pane busy "$footer_gone" "(while :; do tput cup 1 0; printf '✻ Working… (%ss)' \$SECONDS; sleep 1; done &)")"
+busy="$(make_pane busy "$footer_failed" "(while :; do tput cup 1 0; printf '✻ Working… (%ss)' \$SECONDS; sleep 1; done &)")"
 
-for p in "$idle_gone" "$idle_conn" "$busy"; do
+for p in "$idle_failed" "$idle_conn" "$idle_trans" "$busy"; do
   printf '%s\t%s\t%s\t%s\n' "$sock" rc "$p" "$tmp" \
     > "$CCAR_PANES_DIR/$(printf '%s' "$p" | tr -c 'a-zA-Z0-9' _)"
 done
@@ -60,45 +62,48 @@ done
 # (poll_panes), so a bare call would scan nothing at all.
 poll() { refresh_poll_panes; rc_check; }
 
-pr_gone="$sock"$'\t'"$idle_gone"
+pr_failed="$sock"$'\t'"$idle_failed"
 pr_conn="$sock"$'\t'"$idle_conn"
+pr_trans="$sock"$'\t'"$idle_trans"
 pr_busy="$sock"$'\t'"$busy"
 
 echo "first sighting only arms the grace window"
 poll
-[ -n "${rc_missing_since[$pr_gone]:-}" ] && ok "disconnected pane armed"     || bad "disconnected pane armed"
-[ -z "${rc_missing_since[$pr_conn]:-}" ] && ok "connected pane left alone"   || bad "connected pane left alone"
-[ -n "${rc_missing_since[$pr_busy]:-}" ] && ok "busy disconnected pane armed" || bad "busy disconnected pane armed"
-capture "$pr_gone" | grep -q -- '/remote-control' && bad "typed during the grace window" || ok "nothing typed during the grace window"
+[ -n "${rc_failed_since[$pr_failed]:-}" ] && ok "failed pane armed"          || bad "failed pane armed"
+[ -z "${rc_failed_since[$pr_conn]:-}" ]   && ok "connected pane left alone"  || bad "connected pane left alone"
+[ -z "${rc_failed_since[$pr_trans]:-}" ]  && ok "reconnecting pane left alone" || bad "reconnecting pane left alone"
+[ -n "${rc_failed_since[$pr_busy]:-}" ]   && ok "busy failed pane armed"     || bad "busy failed pane armed"
+capture "$pr_failed" | grep -q -- '/remote-control' && bad "typed during the grace window" || ok "nothing typed during the grace window"
 
 echo "after the grace window"
 sleep 2
 rc_last_check=0
 poll
 sleep 0.5
-capture "$pr_gone" | grep -q -- '/remote-control' && ok "idle pane received the reconnect command" || bad "idle pane received the reconnect command"
-[ "${rc_attempts[$pr_gone]:-0}" = 1 ] && ok "attempt counter advanced to 1" || bad "attempt counter advanced to 1 (got ${rc_attempts[$pr_gone]:-unset})"
-gap=$(( ${rc_next_attempt[$pr_gone]:-0} - $(now_epoch) ))
+capture "$pr_failed" | grep -q -- '/remote-control' && ok "idle pane received the reconnect command" || bad "idle pane received the reconnect command"
+[ "${rc_attempts[$pr_failed]:-0}" = 1 ] && ok "attempt counter advanced to 1" || bad "attempt counter advanced to 1 (got ${rc_attempts[$pr_failed]:-unset})"
+gap=$(( ${rc_next_attempt[$pr_failed]:-0} - $(now_epoch) ))
 [ "$gap" -ge 50 ] && [ "$gap" -le 61 ] && ok "backed off ~1 min (${gap}s)" || bad "backed off ~1 min (got ${gap}s)"
 capture "$pr_conn" | grep -q -- '/remote-control' && bad "typed into a CONNECTED pane" || ok "connected pane never typed into"
+capture "$pr_trans" | grep -q -- '/remote-control' && bad "typed into a RECONNECTING pane" || ok "reconnecting pane never typed into"
 capture "$pr_busy" | grep -q -- '/remote-control' && bad "typed into a REPAINTING pane" || ok "repainting pane never typed into"
 [ "${rc_attempts[$pr_busy]:-0}" = 0 ] && ok "a busy pane doesn't consume a backoff step" || bad "a busy pane doesn't consume a backoff step"
 
 echo "backoff holds the pane off until it expires"
 rc_last_check=0
-before="$(capture "$pr_gone" | grep -c -- '/remote-control')"
+before="$(capture "$pr_failed" | grep -c -- '/remote-control')"
 poll
-[ "$before" = "$(capture "$pr_gone" | grep -c -- '/remote-control')" ] \
+[ "$before" = "$(capture "$pr_failed" | grep -c -- '/remote-control')" ] \
   && ok "no second send inside the backoff window" || bad "no second send inside the backoff window"
 
-echo "the indicator returning resets the episode"
-rc_next_attempt[$pr_gone]=0
-tmux -S "$sock" respawn-pane -k -t "$idle_gone" \
+echo "the bridge leaving the failed state resets the episode"
+rc_next_attempt[$pr_failed]=0
+tmux -S "$sock" respawn-pane -k -t "$idle_failed" \
   "clear; printf '❯${nb}\n──────────────────────\n%s\n' '$footer_connected'; cat"
 sleep 0.8
 rc_last_check=0
 poll
-[ -z "${rc_missing_since[$pr_gone]:-}" ] && ok "per-pane state cleared" || bad "per-pane state cleared"
+[ -z "${rc_failed_since[$pr_failed]:-}" ] && ok "per-pane state cleared" || bad "per-pane state cleared"
 
 echo "a pane that disappears is forgotten"
 tmux -S "$sock" kill-window -t busy 2>/dev/null
@@ -106,7 +111,7 @@ rm -f "$CCAR_PANES_DIR"/*"$(printf '%s' "$busy" | tr -c 'a-zA-Z0-9' _)"
 sleep 0.4
 rc_last_check=0
 poll
-[ -z "${rc_missing_since[$pr_busy]:-}" ] && ok "dead pane's state dropped" || bad "dead pane's state dropped"
+[ -z "${rc_failed_since[$pr_busy]:-}" ] && ok "dead pane's state dropped" || bad "dead pane's state dropped"
 
 printf '\n--- monitor.log ---\n'; cat "$CCAR_LOG"
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

@@ -773,26 +773,37 @@ burn_check() { # called once per idle poll; must never disturb the resume path
 #   * The bridge rebuilds its own transport after a laptop sleep or a network
 #     blip, retrying internally before it gives up.
 # What it does NOT do is come back after that internal recovery is EXHAUSTED:
-# the footer indicator disappears and Claude Code's own advice is "run
+# the footer badge reads "/rc failed" and Claude Code's own advice is "run
 # /remote-control again to retry" — a manual step, which is exactly the state an
 # unattended session gets stuck in overnight. This watchdog performs only that
 # last step, and only when it is confident the pane is idle.
 #
+# The badge is the ONLY externally-observable surface of the bridge state: it
+# renders in-memory CLI state (replBridge*) that is not written to any file and
+# is absent from the status-line JSON, so scraping it is all we have. Claude
+# Code's own selector paints exactly one of these when the badge is mounted:
+#   /rc active  (or a bare "/rc" once it has been shown a few times) — connected
+#   /rc reconnecting · /rc connecting…  — transient; Claude Code is self-healing
+#   /rc failed                          — dead, and OURS to act on
+# and mounts NOTHING when the bridge is outbound-only (reachable from the phone
+# but no interactive bridge), disabled, or the pane is narrower than Claude
+# Code's own 60-column cutoff. So "no badge" is not "disconnected" — it is the
+# normal look of an outbound-only or busy pane — and every reading except
+# "/rc failed" is left strictly alone. Matching the bare "/rc" substring instead
+# would both miss real failures (their label still contains "/rc") and fire on
+# benign absence.
+#
 # Evidence, all of it read-only, per pane:
-#   indicator — the footer carries "/rc active" (or a bare "/rc" when the pane is
-#               too narrow to fit the word) while the bridge is up. Missing =
-#               not connected. Claude Code hides the indicator entirely on very
-#               narrow panes, so panes below CCAR_RC_MIN_WIDTH are skipped rather
-#               than guessed about.
-#   grace     — the indicator must stay missing for CCAR_RC_GRACE_SECONDS before
-#               we touch anything, so Claude Code's own reconnect wins the race.
-#   idle      — an input box that is PRESENT and EMPTY, and a screen that is
-#               byte-identical CCAR_SETTLE_SECONDS apart. A session mid-turn
-#               repaints its elapsed-time counter every second, so a settled
-#               screen means nothing is running and nothing is half-typed.
+#   state — rc_state() classifies the footer; only "failed" arms an episode.
+#   grace — the failed state must persist for CCAR_RC_GRACE_SECONDS before we
+#           touch anything, so a failed→reconnecting flap resolves on its own.
+#   idle  — an input box that is PRESENT and EMPTY, and a screen that is
+#           byte-identical CCAR_SETTLE_SECONDS apart. A session mid-turn repaints
+#           its elapsed-time counter every second, so a settled screen means
+#           nothing is running and nothing is half-typed.
 # Then a per-pane exponential backoff (CCAR_RC_BACKOFF_MINUTES) spaces the
-# retries, and any sighting of the indicator resets it.
-declare -A rc_missing_since=()   # paneref -> epoch the indicator first went missing
+# retries, and the bridge leaving the failed state resets it.
+declare -A rc_failed_since=()    # paneref -> epoch the bridge first read /rc failed
 declare -A rc_next_attempt=()    # paneref -> epoch we may next send the command
 declare -A rc_attempts=()        # paneref -> retries already sent this episode
 rc_last_check=0
@@ -812,9 +823,9 @@ rc_tail() { # $1 = screen text
 }
 
 # Just the chrome BELOW the input box — separator, status line, mode line. That is
-# where the indicator is painted, and restricting the search to it keeps a
-# CONVERSATION that happens to mention /rc from reading as "still connected"
-# (which would silently disable the watchdog for that pane). Falls back to the
+# where the badge is painted, and restricting the search to it keeps a
+# CONVERSATION that happens to mention /rc failed from reading as a real failure
+# (which would fire the watchdog at a live pane). Falls back to the
 # whole tail when there is no input box to anchor on; we never act on that state
 # anyway, since rc_input_ready requires the box.
 rc_footer() { # $1 = screen text
@@ -824,8 +835,20 @@ rc_footer() { # $1 = screen text
   if [ -n "$n" ]; then printf '%s\n' "$t" | tail -n +$((n + 1)); else printf '%s\n' "$t"; fi
 }
 
-rc_indicator_present() { # $1 = screen text
-  rc_footer "$1" | grep -E -q "${CCAR_RC_INDICATOR_REGEX}"
+# Which bridge state the footer badge is showing. The failed/transient checks
+# run before the active one because every label contains the "/rc" token the
+# active pattern matches — order is what keeps "/rc failed" from reading as up.
+rc_state() { # $1 = screen text; echoes failed|connected|transient|none
+  local f; f="$(rc_footer "$1")"
+  if printf '%s\n' "$f" | grep -E -q "${CCAR_RC_FAILED_REGEX}"; then
+    printf 'failed'
+  elif printf '%s\n' "$f" | grep -E -q "${CCAR_RC_TRANSIENT_REGEX}"; then
+    printf 'transient'
+  elif printf '%s\n' "$f" | grep -E -q "${CCAR_RC_ACTIVE_REGEX}"; then
+    printf 'connected'
+  else
+    printf 'none'
+  fi
 }
 
 # The input line as Claude Code paints it when idle: the prompt marker and
@@ -905,7 +928,7 @@ rc_send() { # $1 = paneref
 }
 
 rc_forget() { # $1 = paneref
-  unset 'rc_missing_since[$1]' 'rc_next_attempt[$1]' 'rc_attempts[$1]'
+  unset 'rc_failed_since[$1]' 'rc_next_attempt[$1]' 'rc_attempts[$1]'
 }
 
 rc_check() { # called once per idle poll; must never disturb the resume path
@@ -919,28 +942,32 @@ rc_check() { # called once per idle poll; must never disturb the resume path
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     seen="$seen|$p|"
-    # Claude Code hides the indicator on a pane too narrow to fit it, so a narrow
-    # pane tells us nothing — never act on that ambiguity.
+    # Claude Code hides the badge below its 60-column cutoff, so a narrow pane
+    # tells us nothing — never act on that ambiguity.
     width="$(txp "$p" display-message -p -t "$(pr_pane "$p")" '#{pane_width}' 2>/dev/null)"
     case "$width" in ''|*[!0-9]*) continue ;; esac
     [ "$width" -ge "${CCAR_RC_MIN_WIDTH:-80}" ] || continue
 
     scr="$(capture "$p")"
-    if rc_indicator_present "$scr"; then
-      if [ -n "${rc_missing_since[$p]:-}" ]; then
-        since="${rc_missing_since[$p]}"
-        log "rc: remote control is connected again after $((now - since))s (${rc_attempts[$p]:-0} reconnect attempt(s)) — backoff reset"
+    # Only "/rc failed" is ours. connected/transient/none all mean "hands off":
+    # a live bridge, one Claude Code is already reconnecting, or a pane that is
+    # outbound-only, disabled, busy, or too narrow to show a badge at all.
+    if [ "$(rc_state "$scr")" != failed ]; then
+      if [ -n "${rc_failed_since[$p]:-}" ]; then
+        since="${rc_failed_since[$p]}"
+        log "rc: bridge left the failed state after $((now - since))s (${rc_attempts[$p]:-0} reconnect attempt(s)) — backoff reset"
       fi
       rc_forget "$p"
       continue
     fi
 
-    # Indicator gone. Let Claude Code's own transport recovery have the first go.
-    if [ -z "${rc_missing_since[$p]:-}" ]; then
-      rc_missing_since[$p]=$now
+    # Bridge reads failed. Give it a grace window in case it flips to
+    # reconnecting on its own before we type anything.
+    if [ -z "${rc_failed_since[$p]:-}" ]; then
+      rc_failed_since[$p]=$now
       rc_next_attempt[$p]=$((now + ${CCAR_RC_GRACE_SECONDS:-120}))
       rc_attempts[$p]=0
-      log "rc: remote control indicator missing on a pane — waiting ${CCAR_RC_GRACE_SECONDS:-120}s for Claude Code's own reconnect"
+      log "rc: bridge shows /rc failed on a pane — waiting ${CCAR_RC_GRACE_SECONDS:-120}s in case Claude Code recovers"
       continue
     fi
     [ "$now" -ge "${rc_next_attempt[$p]:-0}" ] || continue
@@ -967,18 +994,18 @@ rc_check() { # called once per idle poll; must never disturb the resume path
       continue
     fi
 
-    since="${rc_missing_since[$p]}"
+    since="${rc_failed_since[$p]}"
     idx=$(( ${rc_attempts[$p]:-0} + 1 ))
     if rc_send "$p"; then
       rc_attempts[$p]=$idx
-      log "rc: indicator missing for $((now - since))s — sent ${CCAR_RC_COMMAND} (attempt $idx)"
+      log "rc: /rc failed for $((now - since))s — sent ${CCAR_RC_COMMAND} (attempt $idx)"
     fi
     mins="$(rc_backoff_minutes "$idx")"
     rc_next_attempt[$p]=$((now + mins * 60))
   done <<<"$poll_panes"
 
   # Drop state for panes that are gone (closed, or no longer running claude).
-  for p in "${!rc_missing_since[@]}"; do
+  for p in "${!rc_failed_since[@]}"; do
     case "$seen" in *"|$p|"*) ;; *) rc_forget "$p" ;; esac
   done
 }

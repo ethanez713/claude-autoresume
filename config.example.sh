@@ -278,9 +278,9 @@ CCAR_BURN_CMD=""
 #   * the bridge rebuilds its own transport after a laptop sleep or a network
 #     blip, retrying internally before it gives up.
 # The one state neither covers is AFTER that internal recovery is exhausted: the
-# "/rc active" indicator vanishes from the footer and Claude Code's own advice is
-# to run /remote-control again by hand — which nobody does at 3am. This re-types
-# that command for you, and nothing else.
+# footer badge reads "/rc failed" and Claude Code's own advice is to run
+# /remote-control again by hand — which nobody does at 3am. This re-types that
+# command for you, and nothing else.
 #
 # It only ever types into a pane that is demonstrably idle: an input box that is
 # present and EMPTY, a screen byte-identical CCAR_SETTLE_SECONDS apart (a session
@@ -290,18 +290,26 @@ CCAR_BURN_CMD=""
 # the command it typed, it clears the box and gives up on that attempt.
 CCAR_RC_ENABLE=0                       # 1 to arm it
 CCAR_RC_COMMAND="/remote-control"      # the long form: less ambiguous than /rc to fuzzy completion
-# The footer indicator. Claude Code paints "/rc active" while the bridge is up,
-# and truncates it to a bare "/rc" when the pane is too narrow for the word.
-CCAR_RC_INDICATOR_REGEX='(^|[[:space:]])/rc([[:space:]]|$)'
+# The footer badge, classified into failed / transient / connected / none. Only
+# "/rc failed" — the state where Claude Code itself says to re-run the command —
+# triggers a reconnect. "/rc reconnecting" and "/rc connecting…" mean Claude Code
+# is already recovering (left alone); "/rc active", or the bare "/rc" it collapses
+# to after a few views, means connected; no badge at all means outbound-only,
+# disabled, or too narrow — none of which is a failure. The failed and transient
+# patterns are matched before the active one, since every label contains "/rc".
+CCAR_RC_FAILED_REGEX='(^|[[:space:]])/rc[[:space:]]+failed([[:space:]]|$)'
+CCAR_RC_TRANSIENT_REGEX='(^|[[:space:]])/rc[[:space:]]+(re)?connecting'
+CCAR_RC_ACTIVE_REGEX='(^|[[:space:]])/rc([[:space:]]|$)'
 # The input line's prompt marker, with anything the line holds after it. Used
 # both to prove the box is empty before typing and to read back what landed in it.
 CCAR_RC_PROMPT_REGEX='^[[:space:]]*(❯|>)[[:space:]]*'
 CCAR_RC_TAIL_LINES=8                   # bottom chrome to search (input box, separator, status, mode line)
-# Claude Code HIDES the indicator entirely on a pane too narrow to fit it, so a
-# narrow pane can't distinguish "disconnected" from "no room" — those are skipped.
+# Claude Code HIDES the badge entirely below a 60-column pane, so a narrow pane
+# can't distinguish "failed" from "no room" — those are skipped. Keep this at or
+# above Claude Code's own 60-column cutoff.
 CCAR_RC_MIN_WIDTH=80
 CCAR_RC_CHECK_SECONDS=30               # how often to look (the main poll is far faster than this needs)
-CCAR_RC_GRACE_SECONDS=120              # indicator must stay missing this long — Claude Code's own reconnect goes first
+CCAR_RC_GRACE_SECONDS=120              # /rc failed must persist this long — lets a failed→reconnecting flap resolve first
 CCAR_RC_BUSY_RETRY_SECONDS=60          # retry gap when a reconnect was due but the pane wasn't idle (doesn't consume a backoff step)
 # Exponential backoff between reconnect attempts, in minutes; holds at the last
 # value forever rather than giving up, so a session that was offline for hours

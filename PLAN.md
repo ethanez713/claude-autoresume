@@ -274,20 +274,32 @@ idle-pane non-injection, choice-prompt answer. The real pause message is
 built-ins already cover the obvious cases and are not reimplemented here:
 `remoteControlAtStartup` connects every new session (including panes resumed by
 §4), and the bridge rebuilds its own transport after a sleep or a network blip.
-The residue is the state *after* that internal recovery is exhausted — the
-`/rc active` footer indicator disappears and the documented remedy is to run
-`/remote-control` again **by hand**. That manual step is all this automates.
+The residue is the state *after* that internal recovery is exhausted — the footer
+badge reads `/rc failed` and the documented remedy is to run `/remote-control`
+again **by hand**. That manual step is all this automates.
+
+The badge is the only observable surface of the bridge: it renders in-memory CLI
+state (`replBridge*`) that is not persisted to any file and is absent from the
+status-line JSON, so scraping it is all there is — but it must be read by *state*,
+not by the bare `/rc` substring. Claude Code's own selector paints `/rc active`
+(collapsing to a bare `/rc` after a few views) when up, `/rc reconnecting` /
+`/rc connecting…` while it self-heals, `/rc failed` once dead, and *no badge at
+all* when the bridge is outbound-only, disabled, or the pane is under Claude
+Code's 60-column cutoff. Matching `/rc` as a substring would both miss real
+failures (their label still contains `/rc`) and fire on benign absence.
 
 Read-only evidence, per pane, once every `CCAR_RC_CHECK_SECONDS`:
 
-- **indicator** — `CCAR_RC_INDICATOR_REGEX` against the chrome *below* the input
-  box only (`rc_footer`), so a conversation that merely mentions `/rc` can't read
-  as "still connected" and silently disable the watchdog. Matches both the full
-  `/rc active` and the bare `/rc` that Claude Code truncates to on narrower panes.
+- **state** — `rc_state` classifies the chrome *below* the input box only
+  (`rc_footer`, so a conversation that merely mentions `/rc failed` can't trip
+  it) as `failed` / `transient` / `connected` / `none`, testing
+  `CCAR_RC_FAILED_REGEX` and `CCAR_RC_TRANSIENT_REGEX` before
+  `CCAR_RC_ACTIVE_REGEX` (every label contains the `/rc` token). Only `failed`
+  arms an episode; the rest leave the pane strictly alone.
 - **width** — panes under `CCAR_RC_MIN_WIDTH` are skipped: Claude Code *hides*
-  the indicator when it doesn't fit, so absence there means nothing.
-- **grace** — the indicator must stay missing `CCAR_RC_GRACE_SECONDS` first, so
-  Claude Code's own recovery always gets to win the race.
+  the badge below 60 columns, so absence there means nothing.
+- **grace** — the failed state must persist `CCAR_RC_GRACE_SECONDS` first, so a
+  failed→reconnecting flap resolves on its own before we type anything.
 - **idle** — an input box present and **empty** (`rc_input_ready`; note Claude
   Code pads an empty input line with U+00A0, which `[[:space:]]` does not match —
   `rc_tail` normalises it), plus a screen byte-identical `CCAR_SETTLE_SECONDS`
@@ -305,12 +317,12 @@ sitting there is still a prefix of our own command (`rc_residue_is_ours`).
 Anything else is cleared and abandoned — the pane is never left holding a
 half-typed or mis-completed command. Failures back off per pane
 (`CCAR_RC_BACKOFF_MINUTES`, holding at the longest interval rather than giving
-up); any sighting of the indicator resets the episode.
+up); the bridge leaving the failed state resets the episode.
 
 Tests: `tests/rc_watchdog_test.sh` (helpers, no tmux) and
 `tests/rc_watchdog_e2e.sh` (drives `rc_check` against scratch tmux panes painted
-with connected / disconnected / repainting footers; asserts the connected and
-repainting panes are never typed into).
+with failed / connected / reconnecting / repainting footers; asserts only the
+failed idle pane is typed into).
 
 ## 9. Open
 

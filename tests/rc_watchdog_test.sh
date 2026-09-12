@@ -18,21 +18,29 @@ check() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$3', want '$2')";
 # Claude Code uses to pad an EMPTY input line (an ASCII space would hide the
 # bug that normalisation exists to fix).
 nb=$'\xc2\xa0'
-connected_wide=$'  Some conversation text here\n\n❯'"$nb"$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj                        /rc\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents'
-connected_full=$'❯'"$nb"$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj                              /rc active\n  ⏵⏵ auto mode on (shift+tab to cycle)'
-disconnected=$'  Some conversation text here\n\n❯'"$nb"$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · ⧗ 99% 03:10 · 🖿 /proj\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents'
+mkfoot() { printf '❯%s\n──────────────────\n  Opus 5 hi 💡 · Ctx 8%% · 🖿 /proj %s\n  ⏵⏵ auto mode on' "$nb" "$1"; }
+connected_wide=$(mkfoot "                       /rc")           # collapsed active form
+connected_full=$(mkfoot "                 /rc active")
+failed=$(mkfoot "                    /rc failed")
+reconnecting=$(mkfoot "              /rc reconnecting")
+connecting=$(mkfoot "               /rc connecting…")
+# Outbound-only / disabled / too-narrow: Claude Code mounts no badge at all.
+outbound=$(mkfoot "")
 typing=$'❯ how do I fix\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj\n  ⏵⏵ auto mode on'
 no_box=$'✻ Proofing… (2m 13s · ↓ 6.1k tokens)\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj\n  ⏵⏵ auto mode on'
 menu=$'What do you want to do?\n❯ 1. Stop and wait for limit to reset\n  2. Upgrade your plan\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj'
-# A conversation that merely MENTIONS /rc, with the indicator genuinely gone.
-# Reading it as "connected" would silently disable the watchdog for that pane.
-mentions=$'  I told you to run /rc in the pane\n\n❯'"$nb"$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj\n  ⏵⏵ auto mode on'
+# A conversation that merely MENTIONS /rc failed, with no badge on the footer.
+# Reading the tail as "failed" would fire the watchdog at a live pane.
+mentions=$'  it said /rc failed earlier\n\n❯'"$nb"$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj\n  ⏵⏵ auto mode on'
 
-echo "indicator detection"
-rc_indicator_present "$connected_wide" && ok "narrow-pane form '/rc'"        || bad "narrow-pane form '/rc'"
-rc_indicator_present "$connected_full" && ok "full form '/rc active'"        || bad "full form '/rc active'"
-rc_indicator_present "$disconnected"   && bad "absent indicator read as present" || ok "absent indicator => disconnected"
-rc_indicator_present "$mentions"       && bad "conversation mention read as indicator" || ok "conversation mention above the box ignored"
+echo "state classification"
+check "collapsed active form '/rc'" connected  "$(rc_state "$connected_wide")"
+check "full form '/rc active'"      connected  "$(rc_state "$connected_full")"
+check "'/rc failed' is the trigger" failed     "$(rc_state "$failed")"
+check "'/rc reconnecting' is transient" transient "$(rc_state "$reconnecting")"
+check "'/rc connecting…' is transient"  transient "$(rc_state "$connecting")"
+check "no badge => none (not failed)"   none    "$(rc_state "$outbound")"
+check "a /rc-failed mention above the box is ignored" none "$(rc_state "$mentions")"
 
 echo "input-box readiness"
 rc_input_ready "$connected_wide" && ok "empty box (U+00A0 padded) is ready" || bad "empty box (U+00A0 padded) is ready"
