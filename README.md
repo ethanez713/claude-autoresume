@@ -239,13 +239,13 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
 ```
 
-**Give a Claude pane's window name a leading `✳`** — that anchor is what the
-monitor swaps for the state glyph, and naming windows is your tmux's job, not
-this repo's. In your `~/.tmux.conf`:
+**Give a Claude or Grok pane's window name a leading `✳`** — that anchor is
+what the monitor swaps for the state glyph, and naming windows is your tmux's
+job, not this repo's. In your `~/.tmux.conf`:
 
 ```tmux
 set -g automatic-rename on
-set -g automatic-rename-format '#{?#{==:#{pane_current_command},claude},✳ ,}#{b:pane_current_path}'
+set -g automatic-rename-format '#{?#{||:#{==:#{pane_current_command},claude},#{==:#{pane_current_command},grok}},✳ ,}#{b:pane_current_path}'
 ```
 
 Emit the anchor here rather than lifting it off the terminal title: Claude Code
@@ -274,6 +274,13 @@ cleared only once the pane has held **byte-identical AND spinnerless** for
 `CCAR_BUSY_STALE_SECONDS` (20s) — the state an Esc-interrupt or a `kill -9`
 leaves behind, since a live turn repaints and a parked one does not. That is the
 same frozen-means-parked test `should_resume()` uses on the rate-limit path.
+
+**Grok panes share the glyph, not the scrape.** Grok prefixes `#{pane_title}`
+with a braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) while a turn runs and drops it when
+idle, so the monitor reads the title (`CCAR_GROK_BUSY_TITLE_REGEX`) instead of
+Claude's colour regex. Grok windows on a tmux server that already has a
+registered Claude pane are picked up automatically; they are not latched or
+auto-resumed.
 
 **Detection keys on colour, not on the glyph or the wording.** A finished turn
 leaves a spinner-*shaped* line on screen — `✻ Cooked for 24m 49s` — so matching

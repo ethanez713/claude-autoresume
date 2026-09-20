@@ -30,10 +30,12 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$tmp/state/panes" "$tmp/state/busy" "$tmp/bin"
-# The monitor only watches panes whose foreground command is claude/node
-# (CCAR_FOREGROUND_CMDS). A copy of `sleep` named `claude` blocks the pane open
-# while making tmux report pane_current_command=claude, no tokens spent.
+# The monitor only *resumes* panes whose foreground command is claude/node
+# (CCAR_FOREGROUND_CMDS). Glyphs also follow grok, discovered by command name
+# on the same socket. Copies of `sleep` named `claude`/`grok` block a pane open
+# with the right pane_current_command, no tokens spent.
 cp "$(command -v sleep)" "$tmp/bin/claude"
+cp "$(command -v sleep)" "$tmp/bin/grok"
 export PATH="$tmp/bin:$PATH"
 cat > "$tmp/config.sh" <<EOF
 source "$repo/config.sh"
@@ -130,6 +132,25 @@ set_busy "$pane" 0
 wait_for '[ "$(tm show-options -w -t e2e:0 -v @ccar_busy 2>/dev/null)" = 0 ]' 10
 wait_for 'rendered | grep -q "✳ work"' 10
 has "an idle tab shows the plain ✳ again"       "$(rendered)" "✳ work"
+
+echo
+echo "grok pane discovered on the same socket, glyph from the title"
+# Not registered: grok_panes_on walks list-panes on the claude pane's socket.
+# No client attached: title scrape is cheap enough to run anyway.
+tm new-window -t e2e -n '✳ grokproj' 'grok 600'
+gropane="$(tm list-panes -t e2e:1 -F '#{pane_id}' | head -1)"
+tm select-pane -t "$gropane" -T '⠋ - Thinking - widget - grok'
+wait_for '[ "$(tm show-options -w -t e2e:1 -v @ccar_busy 2>/dev/null)" = 1 ]' 10
+eq  "a grok title spinner publishes working" "$(tm show-options -w -t e2e:1 -v @ccar_busy)" "1"
+grendered() { tm display-message -p -t e2e:1 '#{T:window-status-format}'; }
+wait_for '! grendered | grep -q ✳' 10
+hasnt "a working grok tab drops the idle ✳" "$(grendered)" "✳"
+has  "and keeps the grok window text"       "$(grendered)" "grokproj"
+tm select-pane -t "$gropane" -T 'UV and cloud widget color theming - grok'
+wait_for '[ "$(tm show-options -w -t e2e:1 -v @ccar_busy 2>/dev/null)" = 0 ]' 10
+eq  "an idle grok title publishes idle" "$(tm show-options -w -t e2e:1 -v @ccar_busy)" "0"
+wait_for 'grendered | grep -q "✳ grokproj"' 10
+has "an idle grok tab shows the plain ✳ again" "$(grendered)" "✳ grokproj"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -62,7 +62,8 @@ declare -A pane_hook_veto=()      # paneref -> epoch the pane went frozen-and-sp
 declare -A pane_hook_veto_logged=() # paneref -> 1 once we've logged that pane's stranded flag
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
-poll_panes=""                     # the subset running claude
+poll_panes=""                     # the subset running claude (limit latch + resume + rc)
+poll_busy=""                      # poll_panes plus grok panes on those sockets (glyphs only)
 stats_last_ts=0; stats_last_cpu=0; stats_polls=0; stats_frames=0
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
 
@@ -181,6 +182,16 @@ hash_of() { printf '%s' "$1" | sha1sum | cut -d' ' -f1; }  # $1 = screen text
 screen_shows_working() { # $1 = screen text WITH colour escapes (capture_ansi)
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 1   # empty regex => feature off, NOT "grep matches everything"
   [ -n "$1" ] && printf '%s\n' "$1" | grep -a -E -q "$CCAR_BUSY_REGEX"
+}
+
+# Grok prefixes #{pane_title} with a braille spinner while a turn runs and drops
+# it when idle (unlike Claude, whose title glyph does not change). Matched
+# against the title, not a colour scrape — the spinner is the whole signal.
+# Default is the 10-frame set captured from live panes; empty regex disables.
+title_shows_working() { # $1 = pane title
+  local re="${CCAR_GROK_BUSY_TITLE_REGEX-^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]}"
+  [ -n "$re" ] || return 1
+  [ -n "$1" ] && printf '%s\n' "$1" | grep -a -E -q "$re"
 }
 
 # Splice $3 into whatever $2 already says on server $1, in place of the first of
@@ -380,15 +391,25 @@ decide_busy() {
 
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot
+  local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title
   hook="$(read_hook_busy "$pr")"
   sub="$(read_hook_sub "$pr")"
   [ -n "${pane_parked[$pr]:-}" ] && limited=1
   socket_attached "$(pr_socket "$pr")" && att=1
-  # One capture per attached pane, as before the hooks existed — it answers both
-  # "is the spinner up" and "did anything repaint". An unattached server is still
-  # free: nobody can see that window list, so neither question is worth asking.
-  if [ "$att" = 1 ]; then
+  cmd="$(txp "$pr" display-message -p -t "$(pr_pane "$pr")" '#{pane_current_command}' 2>/dev/null)"
+  if [ "$cmd" = grok ]; then
+    # Title is cheap (one display-message) and is grok's actual working signal,
+    # so we read it even with no client attached — unlike the Claude colour
+    # scrape, which is skipped on a walked-away server.
+    title="$(txp "$pr" display-message -p -t "$(pr_pane "$pr")" '#{pane_title}' 2>/dev/null)"
+    if title_shows_working "$title"; then scrape=1; else scrape=0; fi
+    shot="$(hash_of "$title")"
+    if [ "$shot" = "${pane_busy_snap[$pr]:-}" ]; then frozen=1; else frozen=0; fi
+    pane_busy_snap[$pr]="$shot"
+  elif [ "$att" = 1 ]; then
+    # One capture per attached Claude pane — it answers both "is the spinner up"
+    # and "did anything repaint". An unattached server is still free: nobody can
+    # see that window list, so neither question is worth asking.
     ansi="$(capture_ansi "$pr")"
     if screen_shows_working "$ansi"; then scrape=1; else scrape=0; fi
     shot="$(hash_of "$ansi")"
@@ -1194,6 +1215,29 @@ claude_panes() { # $1 = newline-separated panerefs; keeps those whose foreground
   done <<<"$1"
 }
 
+# Grok panes on any tmux server that already has a registered pane. They get
+# the working glyph (title scrape) but are not latched or resumed — grok is
+# not in CCAR_FOREGROUND_CMDS. Discovery rather than a launcher: grok is
+# started by hand in the same session the claude wrapper already watches.
+grok_panes_on() { # $1 = registry panerefs (used only for their sockets)
+  local pr socket pane cmd seen="|" re="${CCAR_GROK_BUSY_TITLE_REGEX-^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]}"
+  [ -n "$re" ] || return 0
+  while IFS= read -r pr; do
+    [ -z "$pr" ] && continue
+    socket="$(pr_socket "$pr")"
+    case "$seen" in *"|$socket|"*) continue ;; esac
+    seen+="$socket|"
+    while IFS=$'\t' read -r pane cmd; do
+      [ "$cmd" = grok ] || continue
+      printf '%s\n' "$socket"$'\t'"$pane"
+    done < <(tmux -S "$socket" list-panes -a -F '#{pane_id}'$'\t''#{pane_current_command}' 2>/dev/null)
+  done <<<"$1"
+}
+
+busy_watch_panes() { # $1 = registry panerefs: claude + grok, unique
+  { claude_panes "$1"; grok_panes_on "$1"; } | awk 'NF && !seen[$0]++'
+}
+
 # Answering "which panes are alive and running claude" costs two tmux round-trips
 # per registered pane, and scan_panes, rc_check and the idle-exit check each used
 # to ask independently — three walks per poll for an answer that cannot change
@@ -1201,6 +1245,7 @@ claude_panes() { # $1 = newline-separated panerefs; keeps those whose foreground
 refresh_poll_panes() {
   poll_registry="$(registry_panerefs)"
   poll_panes="$(claude_panes "$poll_registry")"
+  poll_busy="$(busy_watch_panes "$poll_registry")"
 }
 
 unlatch_pane() { # $1 = paneref
@@ -1263,14 +1308,15 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
   return 1
 }
 
-# One pass over every claude pane: answer choice prompts and update the latches.
-# Called on every poll of the main loop AND every iteration of a wait, so a pane
-# that pauses mid-wait is still caught, and a latched pane's snapshot tracks the
-# last screen that positively looked paused (robust to redraws/resizes while the
-# pause message stays visible). A fresh sub-limit usage reading vetoes BOTH the
-# prompt answer and the text latch — that is what stops a conversation that
-# merely displays the limit phrase (or quotes the choice menu) from triggering
-# key injection while the account is demonstrably not limited.
+# One pass over every watched pane: glyphs for all of them, choice-prompt
+# answers and latches for claude only. Called on every poll of the main loop
+# AND every iteration of a wait, so a pane that pauses mid-wait is still
+# caught, and a latched pane's snapshot tracks the last screen that positively
+# looked paused (robust to redraws/resizes while the pause message stays
+# visible). A fresh sub-limit usage reading vetoes BOTH the prompt answer and
+# the text latch — that is what stops a conversation that merely displays the
+# limit phrase (or quotes the choice menu) from triggering key injection while
+# the account is demonstrably not limited.
 scan_panes() {
   local p scr ustate was busy_file
   attached=()                # re-probe each scan: attaching must light the indicator back up
@@ -1279,6 +1325,9 @@ scan_panes() {
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     publish_busy "$p"
+  done <<<"$poll_busy"
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
     # Every consumer of $scr below is gated on the account looking limited or on
     # this pane already being latched. With a clear reading and no latch — the
     # normal state — capturing it is a tmux round-trip whose result is discarded.
@@ -1325,8 +1374,9 @@ scan_panes() {
   # A pane that dies mid-turn would otherwise stay "working" forever, animating a
   # window that is gone and pinning the taskbar glyph on. Also drop its hook
   # state file: a kill -9'd claude never fires SessionEnd, so this prune loop is
-  # the only reaper for it.
-  local live=$'\n'"$poll_panes"$'\n'
+  # the only reaper for it. Prune against poll_busy (not poll_panes) so a grok
+  # pane's glyph is not wiped every scan.
+  local live=$'\n'"$poll_busy"$'\n'
   for p in "${!pane_busy[@]}"; do
     case "$live" in
       *$'\n'"$p"$'\n'*) ;;

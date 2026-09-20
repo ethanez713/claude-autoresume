@@ -77,6 +77,11 @@ CCAR_POLL_SECONDS=15                   # how often to poll while watching
 # agent to finish") is past-tense-shaped exactly like the completion line.
 # Set empty to switch the indicator off.
 CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
+# Grok's working signal is the pane title, not a colour scrape: a turn prefixes
+# #{pane_title} with a braille spinner and idle drops it. Captured from live
+# panes (thinking, tool calls, and idle). Empty disables grok glyphs. The
+# Claude scrape above is the master switch for the whole indicator.
+CCAR_GROK_BUSY_TITLE_REGEX='^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
 # How long a pane must sit FROZEN with no spinner on screen, under a hook that
 # still says "working", before the monitor assumes the session's Stop hook was
 # lost (Esc-interrupt, crash) and clears the flag. Both conditions are required:
@@ -84,9 +89,10 @@ CCAR_BUSY_REGEX=$'(^\[38;5;174m[✻✽✢✶✳✺✷*·]|esc to interrupt)'
 # paints its output where the spinner line would be. A repaint or a spinner at
 # any point before this resets the clock.
 CCAR_BUSY_STALE_SECONDS=20
-# What the window name renders as, per pane state. A Claude pane's window name
-# carries a leading ✳ as an anchor (your automatic-rename-format puts it there —
-# see the README), and we swap that ✳ for the glyph of the state the monitor
+# What the window name renders as, per pane state. A Claude or Grok pane's
+# window name carries a leading ✳ as an anchor (your automatic-rename-format
+# puts it there — see the README), and we swap that ✳ for the glyph of the
+# state the monitor
 # publishes in @ccar_busy:
 #   1      a turn is running                     -> @ccar_spin (current frame)
 #   sub    the main agent is idle, subagents are

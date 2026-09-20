@@ -60,6 +60,21 @@ idle "half-typed prompt, nothing sent"             "$typed"
 idle "paused at the rate limit"                    "$paused"
 idle "active spinner quoted in transcript output"  "$quoted"
 
+echo "grok titles (live captures: working panes prefix a braille spinner, idle do not)"
+gbusy()  { title_shows_working "$2" && ok "$1" || bad "$1"; }
+gidle()  { title_shows_working "$2" && bad "$1" || ok "$1"; }
+gbusy "thinking"  "⠋ - Thinking - Widget UV yellow cloud-white detail styl… - grok"
+gbusy "tool call" "⠦ - Running: Read \`/home/ezhou/claude-autor… - Grok status indicators for autoresume mo… - grok"
+gbusy "activity line with no Running:/Thinking" "⠧ - Capture idle vs working Grok pane screen… - Grok status indicators for autoresume mo… - grok"
+gbusy "every braille frame" "⠏ - Thinking - x - grok"
+gidle "idle session summary" "Delete unused screens and outdated spec … - grok"
+gidle "another idle summary" "UV and cloud widget color theming - grok"
+gidle "the word Thinking in an idle summary is not a spinner" "Thinking about widgets - grok"
+gidle "a spinner quoted mid-title is not working" "notes on ⠋ - Thinking - grok"
+gidle "Claude's title glyph is not grok's spinner" "✳ Claude.md default model removal and self-improve summary"
+gidle "empty title" ""
+CCAR_GROK_BUSY_TITLE_REGEX='' title_shows_working "⠋ - Thinking - x - grok" && bad "empty grok regex matches nothing" || ok "empty grok regex matches nothing"
+
 echo "disabled"
 CCAR_BUSY_REGEX='' screen_shows_working "$spin_timer" && bad "matched with an empty regex" || ok "empty regex matches nothing"
 
