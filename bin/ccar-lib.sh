@@ -14,11 +14,27 @@ register_pane() {  # $1=socket_path $2=session $3=pane_id $4=dir
   mv -f "$tmp" "$CCAR_PANES_DIR/$key"
 }
 
+# True only when $1 is a live process that is actually our monitor. A bare
+# `kill -0` cannot tell the monitor from whatever the OS later handed the same
+# pid to: a reboot reassigns the dead monitor's pid to an unrelated process (seen
+# in the wild: a `claude` pane), and the stale pidfile then wedges start_monitor
+# into "already running" forever, so the glyphs never repaint. The script path is
+# always an argv element whatever interpreter prefix bash adds, so match on it.
+monitor_alive() {  # $1 = pid
+  local pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  case "$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null)" in
+    *monitor.sh*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Start the account-wide monitor if not already running.
 start_monitor() {
-  local pidfile="$CCAR_STATE_DIR/monitor.pid"
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    echo "Monitor already running (pid $(cat "$pidfile"))."
+  local pidfile="$CCAR_STATE_DIR/monitor.pid" pid
+  pid="$(cat "$pidfile" 2>/dev/null)"
+  if monitor_alive "$pid"; then
+    echo "Monitor already running (pid $pid)."
   else
     CCAR_CONFIG="${CCAR_CONFIG:-$here/config.sh}" nohup "$here/bin/monitor.sh" >/dev/null 2>&1 &
     echo $! >"$pidfile"

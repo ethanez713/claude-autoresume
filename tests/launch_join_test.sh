@@ -32,5 +32,22 @@ eq "parked at the limit"   "$(busy_label limit)" "parked at the rate limit"
 eq "nothing happening"     "$(busy_label 0)"     "idle"
 eq "a window the monitor has never published for" "$(busy_label '')" "idle"
 
+echo
+echo "monitor_alive"
+# A live process whose argv names monitor.sh is the monitor; one that does not,
+# even when alive, is a recycled pid the pidfile must not be trusted for. exec -a
+# forges each argv[0] without needing a real monitor.sh on disk.
+bash -c 'exec -a /x/monitor.sh sleep 60' & mine=$!
+bash -c 'exec -a /x/sleeper   sleep 60' & other=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -n "$(tr '\0' ' ' </proc/$mine/cmdline 2>/dev/null)" ] &&
+  [ -n "$(tr '\0' ' ' </proc/$other/cmdline 2>/dev/null)" ] && break
+done
+monitor_alive "$mine"  && ok "a live monitor.sh process is the monitor" || bad "a live monitor.sh process is the monitor"
+monitor_alive "$other" && bad "a foreign live pid is not the monitor (pid recycling)" || ok "a foreign live pid is not the monitor (pid recycling)"
+kill "$mine" "$other" 2>/dev/null; wait "$mine" "$other" 2>/dev/null
+monitor_alive "$mine" && bad "a dead pid is not the monitor" || ok "a dead pid is not the monitor"
+monitor_alive ""      && bad "an empty pidfile is not the monitor" || ok "an empty pidfile is not the monitor"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
