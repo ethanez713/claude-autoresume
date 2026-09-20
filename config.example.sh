@@ -115,9 +115,10 @@ CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},1},
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
 CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
-# Grok's own braille spinner, on the same clock, so a working grok tab reads
-# the way the session's title does rather than as another Claude pane.
-CCAR_GROK_BUSY_GLYPHS='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
+# Grok's braille spinner, 4-pip frames only. The title still cycles the full
+# 10-frame set; skipping the 3-pip glyphs here makes the window list lap twice
+# as often on the same clock as Claude's star cycle.
+CCAR_GROK_BUSY_GLYPHS='⠹ ⠼ ⠧ ⠏'
 # Idle grok. Combining/VS16 sequences (the keycap asterisk *️⃣) wrap the tmux
 # status onto a second terminal row on Windows Terminal: tmux counts them as
 # one cell and the terminal paints a wrap, so the pane resizes on every glyph

@@ -280,9 +280,10 @@ same frozen-means-parked test `should_resume()` uses on the rate-limit path.
 **Grok panes share the slot, not the glyphs.** Grok prefixes `#{pane_title}`
 with a braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) while a turn runs and drops it when
 idle, so the monitor reads the title (`CCAR_GROK_BUSY_TITLE_REGEX`) instead of
-Claude's colour regex. The window list then uses that same braille set while
-Grok is working and `🚹` when it is idle, so the two tools cannot be mistaken
-for each other. Grok windows on a tmux server that already has a registered
+Claude's colour regex. The window list then uses the 4-pip frames of that
+spinner (`⠹⠼⠧⠏`) while Grok is working and `🚹` when it is idle, so the two
+tools cannot be mistaken for each other. Grok windows on a tmux server that
+already has a registered
 Claude pane are picked up automatically; they are not latched or auto-resumed.
 
 **Detection keys on colour, not on the glyph or the wording.** A finished turn

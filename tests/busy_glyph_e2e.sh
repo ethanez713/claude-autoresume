@@ -150,7 +150,7 @@ hasnt "and does not use Claude's star spinner"   "$(grendered)" "✻"
 hasnt "nor the idle glyph while working"         "$(grendered)" "🚹"
 has  "and keeps the grok window text"            "$(grendered)" "grokproj"
 case "$(grendered)" in
-  *[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\ grokproj*) ok "a working grok tab uses the braille spinner" ;;
+  *[⠹⠼⠧⠏]\ grokproj*) ok "a working grok tab uses the 4-pip braille spinner" ;;
   *) bad "a working grok tab uses the braille spinner"; printf '       got: %q\n' "$(grendered)" ;;
 esac
 tm select-pane -t "$gropane" -T 'UV and cloud widget color theming - grok'

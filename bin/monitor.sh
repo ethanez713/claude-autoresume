@@ -266,7 +266,7 @@ install_busy_format() {
     # the frame loop never touches have their glyph from the start.
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
-      set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏}")" \; \
+      set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
       set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-🚹}" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
@@ -573,7 +573,7 @@ poll_sleep() {
       [ -n "$socket" ] || continue
       tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; \
         set-option -g @ccar_sub_spin "$(busy_glyph "$busy_frame" "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
-        set-option -g @ccar_grok_spin "$(busy_glyph "$busy_frame" "${CCAR_GROK_BUSY_GLYPHS:-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏}")" \; \
+        set-option -g @ccar_grok_spin "$(busy_glyph "$busy_frame" "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
         refresh-client -S 2>/dev/null
     done <<<"$socks"
     sleep "$nap"
