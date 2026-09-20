@@ -46,6 +46,9 @@ is  "set-titles is turned on so the title reaches the terminal" 'on' "$(opt set-
 is  "a busy window has a glyph before the first frame tick" "$(busy_glyph 0)" "$(opt @ccar_spin)"
 is  "so does one whose subagents are working" \
     "$(busy_glyph 0 "$CCAR_SUBAGENT_GLYPHS")" "$(opt @ccar_sub_spin)"
+is  "a grok window has its braille frame before the first tick" \
+    "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")" "$(opt @ccar_grok_spin)"
+is  "idle grok is the keycap asterisk, published once" "$CCAR_GROK_IDLE_GLYPH" "$(opt @ccar_grok_idle)"
 is  "the limit glyph is static, so it is published once" "$CCAR_LIMIT_GLYPH" "$(opt @ccar_wait)"
 
 # A changed glyph config moves the per-server signature, so the next install
@@ -70,6 +73,8 @@ echo "window name"
 tm set-option -g @ccar_spin '✽'
 tm set-option -g @ccar_sub_spin '◑'
 tm set-option -g @ccar_wait '⧗'
+tm set-option -g @ccar_grok_spin '⠏'
+tm set-option -g @ccar_grok_idle '*️⃣'
 tm set-option -w -t "$pane" @ccar_busy 1
 is "working: the leading ✳ becomes the current frame" '✽ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy sub
@@ -78,6 +83,12 @@ tm set-option -w -t "$pane" @ccar_busy limit
 is "parked at the limit: it becomes the hourglass"    '⧗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
 is "parked: the name is untouched"                    '✳ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm set-option -w -t "$pane" @ccar_kind grok
+tm set-option -w -t "$pane" @ccar_busy 1
+is "working grok: the leading ✳ becomes grok's braille frame" '⠏ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm set-option -w -t "$pane" @ccar_busy 0
+is "idle grok: keycap asterisk, not Claude's ✳"              '*️⃣ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm set-option -w -t "$pane" @ccar_kind ''
 tm set-option -w -t "$pane" @ccar_busy 1
 tm rename-window -t "$pane" '🌒 adbconnect'
 is "another glyph (subagent moon) is left alone"      '🌒 adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"

@@ -56,6 +56,7 @@ declare -A pane_snap_ok=()
 declare -A pane_parked=()
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
+declare -A pane_kind=()           # paneref -> grok | "" (last @ccar_kind we published)
 declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we published for its server
 declare -A pane_busy_snap=()      # paneref -> hash of its last captured screen, for the frozen-pane test
 declare -A pane_hook_veto=()      # paneref -> epoch the pane went frozen-and-spinnerless under a hook-set 1
@@ -265,6 +266,8 @@ install_busy_format() {
     # the frame loop never touches have their glyph from the start.
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
+      set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏}")" \; \
+      set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-*️⃣}" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
     # patched must not be retried (and re-logged) every pass. A rebuild clears it
@@ -439,9 +442,13 @@ publish_busy() { # $1 = paneref
   # Re-set every poll rather than only on a change: the option lives on the
   # window, so moving/splitting/renumbering panes can strand a stale value that
   # a change-gated writer would never correct.
-  txp "$pr" set-option -w -t "$(pr_pane "$pr")" @ccar_busy "$busy" 2>/dev/null
-  [ "${pane_busy[$pr]:-}" = "$busy" ] && return 0
+  local kind=""
+  [ "$cmd" = grok ] && kind=grok
+  txp "$pr" set-option -w -t "$(pr_pane "$pr")" @ccar_busy "$busy" \; \
+    set-option -w -t "$(pr_pane "$pr")" @ccar_kind "$kind" 2>/dev/null
+  [ "${pane_busy[$pr]:-}" = "$busy" ] && [ "${pane_kind[$pr]:-}" = "$kind" ] && return 0
   pane_busy[$pr]="$busy"
+  pane_kind[$pr]="$kind"
   txp "$pr" refresh-client -S 2>/dev/null   # repaint now instead of at the next status-interval
 }
 
@@ -566,6 +573,7 @@ poll_sleep() {
       [ -n "$socket" ] || continue
       tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; \
         set-option -g @ccar_sub_spin "$(busy_glyph "$busy_frame" "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
+        set-option -g @ccar_grok_spin "$(busy_glyph "$busy_frame" "${CCAR_GROK_BUSY_GLYPHS:-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏}")" \; \
         refresh-client -S 2>/dev/null
     done <<<"$socks"
     sleep "$nap"
@@ -1381,7 +1389,7 @@ scan_panes() {
     case "$live" in
       *$'\n'"$p"$'\n'*) ;;
       *)
-        unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]'
+        unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]' 'pane_kind[$p]'
         busy_file="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")"
         rm -f "$busy_file" "$busy_file.sub" "$(dirname "$busy_file")/.$(basename "$busy_file").sublock" 2>/dev/null
         ;;

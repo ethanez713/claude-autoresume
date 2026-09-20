@@ -88,6 +88,10 @@ check "wraps past the last frame" '✻' "$(busy_glyph 5)"
 check "wraps repeatedly"        '✢' "$(busy_glyph 22)"
 check "a single glyph is a static indicator" '●' "$(CCAR_BUSY_GLYPHS='●' busy_glyph 7)"
 check "no glyphs configured => nothing to paint" '' "$(CCAR_BUSY_GLYPHS='' busy_glyph 0)"
+CCAR_GROK_BUSY_GLYPHS='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
+check "grok frame 0 is grok's own spinner" '⠋' "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")"
+check "grok frame 9 wraps the braille set" '⠏' "$(busy_glyph 9 "$CCAR_GROK_BUSY_GLYPHS")"
+check "grok frame 10 wraps to the start"   '⠋' "$(busy_glyph 10 "$CCAR_GROK_BUSY_GLYPHS")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
