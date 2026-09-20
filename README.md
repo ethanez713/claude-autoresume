@@ -238,7 +238,7 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 3:◑ notes               <- Claude idle; its subagents are still working
 4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
 5:⠏ chinese             <- Grok, running a turn (its own braille spinner)
-6:✱ windows_or_ac       <- Grok, idle
+6:🚹 windows_or_ac      <- Grok, idle
 ```
 
 **Give a Claude or Grok pane's window name a leading `✳`** — that anchor is
@@ -281,7 +281,7 @@ same frozen-means-parked test `should_resume()` uses on the rate-limit path.
 with a braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) while a turn runs and drops it when
 idle, so the monitor reads the title (`CCAR_GROK_BUSY_TITLE_REGEX`) instead of
 Claude's colour regex. The window list then uses that same braille set while
-Grok is working and `✱` when it is idle, so the two tools cannot be mistaken
+Grok is working and `🚹` when it is idle, so the two tools cannot be mistaken
 for each other. Grok windows on a tmux server that already has a registered
 Claude pane are picked up automatically; they are not latched or auto-resumed.
 

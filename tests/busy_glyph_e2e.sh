@@ -147,7 +147,7 @@ eq  "a grok pane is tagged grok, not claude" "$(tm show-options -w -t e2e:1 -v @
 wait_for '! grendered | grep -q ✳' 10
 hasnt "a working grok tab drops Claude's idle ✳" "$(grendered)" "✳"
 hasnt "and does not use Claude's star spinner"   "$(grendered)" "✻"
-hasnt "nor the idle glyph while working"         "$(grendered)" "✱"
+hasnt "nor the idle glyph while working"         "$(grendered)" "🚹"
 has  "and keeps the grok window text"            "$(grendered)" "grokproj"
 case "$(grendered)" in
   *[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\ grokproj*) ok "a working grok tab uses the braille spinner" ;;
@@ -156,8 +156,8 @@ esac
 tm select-pane -t "$gropane" -T 'UV and cloud widget color theming - grok'
 wait_for '[ "$(tm show-options -w -t e2e:1 -v @ccar_busy 2>/dev/null)" = 0 ]' 10
 eq  "an idle grok title publishes idle" "$(tm show-options -w -t e2e:1 -v @ccar_busy)" "0"
-wait_for 'grendered | grep -q "✱ grokproj"' 10
-has "an idle grok tab shows the heavy asterisk" "$(grendered)" "✱ grokproj"
+wait_for 'grendered | grep -q "🚹 grokproj"' 10
+has "an idle grok tab shows the mens-symbol emoji" "$(grendered)" "🚹 grokproj"
 hasnt "idle grok is not Claude's ✳"              "$(grendered)" "✳"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

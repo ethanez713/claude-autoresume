@@ -118,11 +118,12 @@ CCAR_BUSY_GLYPHS='· * ✢ ✶ ✽ ✻ ✽ ✶ ✢ *'
 # Grok's own braille spinner, on the same clock, so a working grok tab reads
 # the way the session's title does rather than as another Claude pane.
 CCAR_GROK_BUSY_GLYPHS='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
-# Idle grok. Must be one codepoint of wcwidth 1 — a combining/emoji sequence
-# (the keycap asterisk *️⃣ is U+002A+VS16+U+20E3) wraps the tmux status onto a
-# second terminal row on Windows Terminal, and the pane then resizes on every
-# glyph refresh. ✱ is the same dingbat family as Claude's idle ✳.
-CCAR_GROK_IDLE_GLYPH='✱'
+# Idle grok. Combining/VS16 sequences (the keycap asterisk *️⃣) wrap the tmux
+# status onto a second terminal row on Windows Terminal: tmux counts them as
+# one cell and the terminal paints a wrap, so the pane resizes on every glyph
+# refresh. A single codepoint both sides agree on is fine — 🚹 is U+1F6B9,
+# wcwidth 2.
+CCAR_GROK_IDLE_GLYPH='🚹'
 # Frames for the subagent indicator, on the same clock — a phase cycle rather
 # than a star one, so delegated work reads as a different KIND of activity at a
 # glance and not just a different session. Single-width, unlike the emoji moons

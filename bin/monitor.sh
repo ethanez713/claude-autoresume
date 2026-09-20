@@ -267,7 +267,7 @@ install_busy_format() {
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
       set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏}")" \; \
-      set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-✱}" \; \
+      set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-🚹}" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
     # patched must not be retried (and re-logged) every pass. A rebuild clears it

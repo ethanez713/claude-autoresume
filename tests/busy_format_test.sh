@@ -48,7 +48,7 @@ is  "so does one whose subagents are working" \
     "$(busy_glyph 0 "$CCAR_SUBAGENT_GLYPHS")" "$(opt @ccar_sub_spin)"
 is  "a grok window has its braille frame before the first tick" \
     "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")" "$(opt @ccar_grok_spin)"
-is  "idle grok is the heavy asterisk, published once" "$CCAR_GROK_IDLE_GLYPH" "$(opt @ccar_grok_idle)"
+is  "idle grok is the mens-symbol emoji, published once" "$CCAR_GROK_IDLE_GLYPH" "$(opt @ccar_grok_idle)"
 is  "the limit glyph is static, so it is published once" "$CCAR_LIMIT_GLYPH" "$(opt @ccar_wait)"
 
 # A changed glyph config moves the per-server signature, so the next install
@@ -87,7 +87,7 @@ tm set-option -w -t "$pane" @ccar_kind grok
 tm set-option -w -t "$pane" @ccar_busy 1
 is "working grok: the leading ✳ becomes grok's braille frame" '⠏ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
-is "idle grok: heavy asterisk, not Claude's ✳"               "$CCAR_GROK_IDLE_GLYPH adbconnect" "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "idle grok: mens-symbol emoji, not Claude's ✳"            "$CCAR_GROK_IDLE_GLYPH adbconnect" "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_kind ''
 tm set-option -w -t "$pane" @ccar_busy 1
 tm rename-window -t "$pane" '🌒 adbconnect'
