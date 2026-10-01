@@ -245,7 +245,7 @@ install_busy_format() {
   # wipes this option along with the format, so a mismatch (or an absent sig)
   # re-applies; a changed CCAR_BUSY_* config after a monitor restart re-applies
   # too, since the sig differs.
-  sig="$CCAR_BUSY_NAME_FORMAT"$'\n'"${CCAR_BUSY_TITLE_FORMAT:-}"$'\n'"${CCAR_GROK_IDLE_GLYPH:-}"$'\n'"${CCAR_LIMIT_GLYPH:-}"
+  sig="$CCAR_BUSY_NAME_FORMAT"$'\n'"${CCAR_BUSY_TITLE_FORMAT:-}"$'\n'"${CCAR_GROK_IDLE_GLYPH:-}"$'\n'"${CCAR_LIMIT_GLYPH:-}"$'\n'"${CCAR_ASK_GLYPH:-}"
   while IFS=$'\t' read -r socket session; do
     [ "$(tmux -S "$socket" show-options -gv @ccar_fmt_sig 2>/dev/null)" = "$sig" ] && continue
     for opt in window-status-format window-status-current-format; do
@@ -268,7 +268,8 @@ install_busy_format() {
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
       set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
       set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-🚹}" \; \
-      set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" 2>/dev/null
+      set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" \; \
+      set-option -g @ccar_ask "${CCAR_ASK_GLYPH:-❗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
     # patched must not be retried (and re-logged) every pass. A rebuild clears it
     # with the server; a config change moves the sig, so either re-attempts once.
@@ -295,7 +296,7 @@ pane_key() { # $1 = paneref
 }
 
 # Primary @ccar_busy signal: the per-pane state bin/cc-busy-hook writes on every
-# UserPromptSubmit/Stop/SessionStart/SessionEnd. Echoes "0"/"1", or "" when
+# UserPromptSubmit/Stop/SessionStart/SessionEnd. Echoes "0"/"1"/"ask", or "" when
 # there is no hook state at all (missing file, unreadable, or garbage) — the
 # caller reads that as "no hook installed for this pane, fall back". Defaults
 # CCAR_BUSY_DIR the same way bin/cc-busy-hook does: an existing install.sh never
@@ -307,7 +308,7 @@ read_hook_busy() { # $1 = paneref
   [ -f "$f" ] || return 0
   IFS=$'\t' read -r state _ <"$f" 2>/dev/null
   case "$state" in
-    0|1) printf '%s' "$state" ;;
+    0|1|ask) printf '%s' "$state" ;;
   esac
 }
 
@@ -340,11 +341,15 @@ read_hook_sub() { # $1 = paneref
 #                                    without that evidence does NOT count, so an
 #                                    idle pane swept into an account-usage latch
 #                                    keeps its own glyph)
-# Echoes the pane's state: "limit" (parked until the window resets), "1" (the
-# main agent is running a turn), "sub" (the main agent is idle, its subagents are
+# Echoes the pane's state: "ask" (a dialog is waiting on the user), "limit"
+# (parked until the window resets), "1" (the main agent is running a turn), "sub" (the main agent is idle, its subagents are
 # not) or "0" (idle).
 #
 # The signals disagree in every direction, and each is authoritative somewhere:
+#
+#   ask outranks every other hook signal and the stale-clear below: a dialog is a
+#   frozen, spinnerless screen by construction, which is exactly what that clear
+#   would read as an interrupted turn.
 #
 #   limited wins over a stale hook flag but not over a live spinner. A pane
 #   parked at the limit is not working whatever its last hook said — a turn cut
@@ -380,6 +385,7 @@ decide_busy() {
   # the scrape overrides — a stale hook flag from an interrupted turn does not, and
   # an unattached pane (scrape "") has no live signal, so it keeps the parked glyph.
   [ "$limited" = 1 ] && [ "$scrape" != 1 ] && { printf 'limit'; return; }
+  [ "$hook" = ask ] && { printf 'ask'; return; }
   # A frozen, spinnerless pane has held still too long for any hook flag on it to
   # still be true. Anything else — a repaint, or nobody attached to look — leaves
   # the flags standing.
@@ -525,7 +531,7 @@ publish_any_busy() {
   [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ] || return 0
   local p s state
   local -A any=()
-  local -A rank=([0]=0 [limit]=1 [sub]=2 [1]=3)
+  local -A rank=([0]=0 [limit]=1 [sub]=2 [1]=3 [ask]=4)
   for p in "${!pane_busy[@]}"; do
     s="$(pr_socket "$p")"; state="${pane_busy[$p]}"
     [ -n "${any[$s]:-}" ] && [ "${rank[${any[$s]}]:-0}" -ge "${rank[$state]:-0}" ] && continue

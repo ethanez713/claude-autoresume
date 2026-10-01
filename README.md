@@ -254,13 +254,17 @@ Emit the anchor here rather than lifting it off the terminal title: Claude Code
 does put a `✳` in front of its title, but not on every pane in every state, and a
 window whose name is missing the anchor gets no glyph at all.
 
-**The signal is hook-driven, not scraped.** `./install.sh` writes six hooks
+**The signal is hook-driven, not scraped.** `./install.sh` writes the hooks
 into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
 `UserPromptSubmit` (a turn started), `Stop` (it ended), `SubagentStart` /
 `SubagentStop` (a subagent came or went), `SessionStart` (clears flags stranded
 by a previous session in this pane, and tells the monitor hooks are live here),
 and `SessionEnd` (drops the pane's state entirely). The first two write a single
-`0`/`1` to a per-pane file in `CCAR_BUSY_DIR`; the subagent pair keeps a count
+`0`/`1` to a per-pane file in `CCAR_BUSY_DIR`; `PermissionRequest` and a
+`PreToolUse` scoped to `AskUserQuestion|ExitPlanMode` write `ask` there while a
+dialog waits on you (the window shows `CCAR_ASK_GLYPH`, and the stale-clear below
+never applies to it), and the first `PostToolUse`/`PostToolUseFailure` after it
+puts the `1` back; the subagent pair keeps a count
 beside it, under an `flock` because a fan-out starts several in the same instant.
 The monitor reads both via `read_hook_busy()` and `read_hook_sub()`.
 

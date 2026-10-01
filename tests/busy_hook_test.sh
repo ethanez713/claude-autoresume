@@ -34,6 +34,8 @@ printf '0\t1700000000\n' >"$busy_dir/$key"
 eq "file says 0"             "0" "$(read_hook_busy "$pr")"
 printf '1\t1700000000\n' >"$busy_dir/$key"
 eq "file says 1"             "1" "$(read_hook_busy "$pr")"
+printf 'ask\t1700000000\n' >"$busy_dir/$key"
+eq "file says ask"           "ask" "$(read_hook_busy "$pr")"
 printf 'garbage\n' >"$busy_dir/$key"
 eq "garbage contents -> empty" "" "$(read_hook_busy "$pr")"
 rm -f "$busy_dir/$key"
@@ -104,6 +106,33 @@ eq "SessionEnd: exit 0"          "0" "$rc"
 eq "SessionEnd: removes the file" "(none)" "$(hook_state)"
 eq "SessionEnd: removes the subagent count too" "(none)" "$(sub_state)"
 
+for ev in PermissionRequest PreToolUse; do
+  printf '1\t1700000000\n' >"$busy_dir/$key"
+  out="$(run_hook $ev 2>&1)"; rc=$?
+  eq "$ev: silent"     "" "$out"
+  eq "$ev: exit 0"     "0" "$rc"
+  eq "$ev: writes ask" "ask" "$(hook_state)"
+done
+for ev in PostToolUse PostToolUseFailure; do
+  printf 'ask\t1700000000\n' >"$busy_dir/$key"
+  out="$(run_hook $ev 2>&1)"; rc=$?
+  eq "$ev: silent"                  "" "$out"
+  eq "$ev: exit 0"                  "0" "$rc"
+  eq "$ev: an answered dialog resumes the turn" "1" "$(hook_state)"
+  printf '0\t1700000000\n' >"$busy_dir/$key"
+  run_hook $ev
+  eq "$ev: leaves an idle pane alone" "0" "$(hook_state)"
+  rm -f "$busy_dir/$key"
+  run_hook $ev
+  eq "$ev: creates no state file"   "(none)" "$(hook_state)"
+done
+printf 'ask\t1700000000\n' >"$busy_dir/$key"
+run_hook Stop
+eq "Stop: clears ask"                "0" "$(hook_state)"
+printf 'ask\t1700000000\n' >"$busy_dir/$key"
+run_hook UserPromptSubmit
+eq "UserPromptSubmit: clears ask"    "1" "$(hook_state)"
+
 printf '1\t1700000000\n' >"$busy_dir/$key"
 out="$(run_hook SomeOtherEvent 2>&1)"; rc=$?
 eq "unknown event: silent"         "" "$out"
@@ -128,6 +157,12 @@ eq "hook=1, scrape agrees -> busy 1"               "1" "$(decide_busy 1 1 0 '')"
 eq "hook='', attached, scrape working -> busy 1"   "1" "$(decide_busy '' 1 0 '')"
 eq "hook='', attached, scrape idle -> busy 0"      "0" "$(decide_busy '' 0 1 '')"
 eq "hook='', not attached -> busy 0"               "0" "$(decide_busy '' '' '' '')"
+
+eq "hook=ask, frozen and spinnerless past the stale age -> still ask" \
+   "ask" "$(decide_busy ask 0 1 9999)"
+eq "hook=ask, not attached -> ask"                 "ask" "$(decide_busy ask '' '' '')"
+eq "hook=ask outranks a subagent count"            "ask" "$(decide_busy ask 0 1 '' 1)"
+eq "parked at the limit, no spinner, beats ask"    "limit" "$(decide_busy ask 0 1 '' 0 1)"
 
 # THE regression this rule exists for: while a tool call runs, the pane paints
 # the tool's output where the spinner line would be, so the scrape reads idle on

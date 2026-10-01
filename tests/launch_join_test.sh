@@ -28,6 +28,7 @@ echo
 echo "busy_label"
 eq "a running turn"        "$(busy_label 1)"     "working"
 eq "delegated work"        "$(busy_label sub)"   "idle, subagents still working"
+eq "a dialog awaiting you" "$(busy_label ask)"     "waiting for your answer"
 eq "parked at the limit"   "$(busy_label limit)" "parked at the rate limit"
 eq "nothing happening"     "$(busy_label 0)"     "idle"
 eq "a window the monitor has never published for" "$(busy_label '')" "idle"

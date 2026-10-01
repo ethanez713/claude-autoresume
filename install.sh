@@ -157,8 +157,14 @@ import json, os
 
 path = os.environ["CCAR_SETTINGS"]
 hook_bin = os.environ["CCAR_HOOK_BIN"]
-events = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
-          "SessionStart", "SessionEnd"]
+# (event, matcher): PreToolUse is scoped to the two tools that open a dialog; the
+# user's own PreToolUse entries carry other matchers and are never touched.
+events = [("UserPromptSubmit", None), ("Stop", None),
+          ("SubagentStart", None), ("SubagentStop", None),
+          ("SessionStart", None), ("SessionEnd", None),
+          ("PermissionRequest", None), ("PostToolUse", None),
+          ("PostToolUseFailure", None),
+          ("PreToolUse", "AskUserQuestion|ExitPlanMode")]
 
 if not os.path.exists(path):
     os.umask(0o077)
@@ -177,11 +183,13 @@ if not os.path.exists(bak):
 
 hooks = settings.setdefault("hooks", {})
 changed = False
-for event in events:
+for event, matcher in events:
     entries = hooks.setdefault(event, [])
     wanted = {"type": "command", "command": f"{hook_bin} {event}", "timeout": 5}
     matched = False
     for entry in entries:
+        if entry.get("matcher") != matcher:
+            continue
         for h in entry.get("hooks", []):
             if "cc-busy-hook" in h.get("command", ""):
                 if h != wanted:
@@ -190,7 +198,10 @@ for event in events:
                     changed = True
                 matched = True
     if not matched:
-        entries.append({"hooks": [wanted]})
+        entry = {"hooks": [wanted]}
+        if matcher:
+            entry["matcher"] = matcher
+        entries.append(entry)
         changed = True
 
 tmp = path + ".tmp"
@@ -209,7 +220,7 @@ PY
   if [ "$rc" -ne 0 ]; then
     warn "could not patch $CLAUDE_DIR/settings.json with the busy-state hooks."
     info "claude-autoresume still works via the on-screen-text fallback. Add the"
-    info "six hooks (UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
+    info "hooks (UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd/PermissionRequest/PostToolUse/PostToolUseFailure, and PreToolUse matching AskUserQuestion|ExitPlanMode -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
   fi
   return 0
 }

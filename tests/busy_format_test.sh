@@ -50,6 +50,7 @@ is  "a grok window has its braille frame before the first tick" \
     "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")" "$(opt @ccar_grok_spin)"
 is  "idle grok is the mens-symbol emoji, published once" "$CCAR_GROK_IDLE_GLYPH" "$(opt @ccar_grok_idle)"
 is  "the limit glyph is static, so it is published once" "$CCAR_LIMIT_GLYPH" "$(opt @ccar_wait)"
+is  "so is the dialog-waiting glyph" "$CCAR_ASK_GLYPH" "$(opt @ccar_ask)"
 
 # A changed glyph config moves the per-server signature, so the next install
 # re-patches — re-deriving from the stash, not nesting its own output.
@@ -73,6 +74,7 @@ echo "window name"
 tm set-option -g @ccar_spin '✽'
 tm set-option -g @ccar_sub_spin '◑'
 tm set-option -g @ccar_wait '⧗'
+tm set-option -g @ccar_ask '❗'
 tm set-option -g @ccar_grok_spin '⠏'
 tm set-option -g @ccar_grok_idle "$CCAR_GROK_IDLE_GLYPH"
 tm set-option -w -t "$pane" @ccar_busy 1
@@ -81,6 +83,8 @@ tm set-option -w -t "$pane" @ccar_busy sub
 is "subagents out: it becomes the subagent frame"     '◑ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy limit
 is "parked at the limit: it becomes the hourglass"    '⧗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm set-option -w -t "$pane" @ccar_busy ask
+is "a dialog awaits the user: it becomes the attention glyph" '❗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
 is "parked: the name is untouched"                    '✳ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_kind grok
@@ -98,6 +102,8 @@ echo "terminal title"
 tm set-option -w -t "$pane" @ccar_busy 0    # the title must ignore the per-window flag
 tm set-option -g @ccar_any_busy 1
 is "any session working: the title sparkles"     '✽ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+tm set-option -g @ccar_any_busy ask
+is "any session awaiting the user: the taskbar flags it" '❗ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy sub
 is "only subagents left working: the title moons" '◑ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy limit
@@ -127,6 +133,10 @@ socket_any_busy=()
 pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=1)
 publish_any_busy
 is "a running turn outranks both"             '1'     "$(opt @ccar_any_busy)"
+socket_any_busy=()
+pane_busy=(["$sock"$'\t'"$pane"]=ask ["$sock"$'\t'%99]=1)
+publish_any_busy
+is "a pane awaiting the user outranks a running one" 'ask' "$(opt @ccar_any_busy)"
 socket_any_busy=()
 pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=0)
 publish_any_busy

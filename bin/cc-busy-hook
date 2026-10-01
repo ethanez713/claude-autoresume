@@ -7,8 +7,8 @@
 # on stdin; we never read it.
 #
 # Runs synchronously, inline in the user's Claude session, on every
-# UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd — so
-# it must be silent and never fail the hook: no stdout/stderr, always exit 0,
+# UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd and on
+# every PostToolUse — so it must be silent and never fail the hook: no stdout/stderr, always exit 0,
 # whatever else goes wrong.
 set -euo pipefail
 trap 'exit 0' EXIT
@@ -73,8 +73,21 @@ bump_subagents() { # $1 = 1 | -1
   write_field "$sub_file" "$n"
 }
 
+# The pane's state is "ask" while a dialog (permission prompt, AskUserQuestion,
+# plan approval) waits on the user. Any tool completing proves the dialog was
+# answered, so PostToolUse* resumes it to 1 — reading first keeps the many
+# ordinary tool calls from writing at all.
+resume_if_asking() {
+  local state
+  IFS=$'\t' read -r state _ <"$state_file" 2>/dev/null || return 0
+  [ "$state" = ask ] && write_state 1
+  return 0
+}
+
 case "$event" in
   UserPromptSubmit) write_state 1 ;;
+  PermissionRequest|PreToolUse) write_state ask ;;
+  PostToolUse|PostToolUseFailure) resume_if_asking ;;
   Stop)             write_state 0 ;;
   SubagentStart)    bump_subagents 1 ;;
   SubagentStop)     bump_subagents -1 ;;
