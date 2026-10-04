@@ -77,11 +77,13 @@ Three design decisions carry the whole thing:
     `exec claude [--session-id <uuid>] [args]` in the current pane. `exec` only
     replaces cc-run (a child of your shell), so the pane stays and your prompt
     returns when claude exits. No new window, no attach, **no nesting**.
-  - **Out-of-tmux fallback** — ensures the private session `cc` exists, opens a
-    window per `$PWD` running `exec claude …`, registers that pane too, then
-    attaches overriding `TERM` to `$CCAR_OUTER_TERM`. `-c/--continue` reconnects
-    to this dir's live window if present; `-r/--resume` opens claude's picker.
-    (Reconnect flags don't pin `--session-id`, which claude forbids with them.)
+  - **Out-of-tmux fallback** — if the private session `cc` is already up, a plain
+    launch (bare `claude` or `-c`) attaches to it, selecting this directory's
+    window when one exists, and opens nothing. A prompt, `--resume`, or any
+    other option still gets its own window. With no server, it creates the
+    session, opens one window for `$PWD` running `exec claude …`, registers
+    that pane, then attaches overriding `TERM` to `$CCAR_OUTER_TERM`.
+    (`-c`/`--resume` don't pin `--session-id`, which claude forbids with them.)
   - Both paths share `register_pane` (writes the registry file) and `start_monitor`
     (pidfile-guarded).
 

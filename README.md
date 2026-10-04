@@ -90,9 +90,9 @@ The alias is a transparent stand-in for the real CLI:
   session launch gets wrapped.
 - **Runs where you are.** Inside tmux, `claude` runs a fresh conversation in your
   current pane (native semantics — `claude` always starts fresh; use `-c` to
-  continue this dir's last convo). The fallback path keeps one window per `$PWD`,
-  keyed to its dir via a `@ccar_dir` tmux option, and rejoins that window rather
-  than stacking another on top of it.
+  continue this dir's last convo). The fallback path keys each window to its
+  directory via a `@ccar_dir` tmux option and, on a plain launch, rejoins that
+  window when one already exists.
 - **One account-wide monitor** watches every registered pane. Because the rate
   limit is per-account (all sessions pause together), on reset it resumes *all*
   paused panes, not just one.
@@ -128,10 +128,12 @@ A wrapped session is already running on socket 'ccar':
 Attach? [Y/n]
 ```
 
-`Y` (the default) attaches. Standing in a directory the session already has a
-window for, it takes you back to that window; anywhere else it opens one and
-launches Claude there first. An invocation the running window can't satisfy — a
-prompt to deliver, `--resume`, any other option — always gets its own window.
+`Y` (the default) attaches to the session as it is. Standing in a directory the
+session already has a window for, it takes you back to that window. Standing
+anywhere else, it attaches to whichever window was current; a new tab is
+something you open inside tmux and launch `claude` in. An invocation the
+running window can't satisfy — a prompt to deliver, `--resume`, any other
+option — still gets its own window.
 
 `N` ends that whole session, running turns included, and starts over with a
 single window for where you are. It is the only destructive answer in this repo,

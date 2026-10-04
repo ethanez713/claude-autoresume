@@ -82,8 +82,20 @@ echo "a session is running, launched from another directory"
 launch "$beta"
 has "the running windows are listed" "$(screen)" "$alpha"
 has "with what each pane is doing"   "$(screen)" "idle"
-has "Y opens a window here"          "$(screen)" "attach, and open a window for $beta"
+has "Y only attaches"                "$(screen)" "[Y] attach"
 has "N says what it ends"            "$(screen)" "end that session"
+case "$(screen)" in
+  *"open a window"*|*"own window"*) bad "Y does not offer to open or retarget a window" ;;
+  *) ok "Y does not offer to open or retarget a window" ;;
+esac
+answer y
+eq "y attaches and adds no window" "$(windows)" "$alpha "
+[ -e "$beta/.argv" ] && bad "and launches no claude there" || ok "and launches no claude there"
+
+echo
+echo "a prompt still needs a window of its own"
+launch "$beta" "fix the bug"
+has "Y opens a window for the prompt" "$(screen)" "attach, and open a window for $beta"
 answer y
 eq "y keeps the old window and adds this one" "$(windows)" "$alpha $beta "
 

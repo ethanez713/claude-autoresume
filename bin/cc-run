@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # claude-autoresume launcher (PLAN.md §3b) — makes `claude` survive rate limits.
 # Inside tmux: registers the current pane and execs claude in place (no nesting).
-# Outside tmux: builds the private ccar server, opens a per-dir window, attaches.
+# Outside tmux: attaches to the private ccar server when it is already up.
+# A plain launch opens no window; the first launch builds one for $PWD.
 # Either way it ensures the account-wide monitor is up and binds the cancel key.
 # Non-interactive invocations (print mode, subcommands, --version, piped stdin)
 # pass straight through to the real claude.
@@ -183,6 +184,8 @@ confirm_join() {
   echo
   if [ -n "$rejoin_win" ]; then
     echo "  [Y] attach, on this directory's own window"
+  elif wants_rejoin "$@"; then
+    echo "  [Y] attach"
   else
     echo "  [Y] attach, and open a window for $PWD"
   fi
@@ -204,7 +207,7 @@ if tx has-session -t "$CCAR_TMUX_SESSION" 2>/dev/null; then
   had_session=1
   wants_rejoin "$@" && rejoin_win="$(dir_window)"
   join=attach
-  confirm_join
+  confirm_join "$@"
   if [ "$join" = fresh ]; then
     tx kill-server 2>/dev/null || true
     forget_dead_panes
@@ -257,6 +260,9 @@ if [ -n "$rejoin_win" ] && [ "$created" -eq 0 ]; then
   win="$rejoin_win"
   tx select-window -t "$win"
   echo "Reconnecting to the live wrapped session for $PWD (window $win)."
+elif [ "$created" -eq 0 ] && wants_rejoin "$@"; then
+  # A plain reconnect only attaches. A new tab is opened from inside the session.
+  echo "Attaching to the live wrapped session."
 else
   # New window for this dir (or reuse the session's first window if we just made it).
   if [ "$created" -eq 1 ]; then
