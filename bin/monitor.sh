@@ -61,6 +61,9 @@ declare -A socket_any_busy=()     # socket -> last @ccar_any_busy value we publi
 declare -A pane_busy_snap=()      # paneref -> hash of its last captured screen, for the frozen-pane test
 declare -A pane_hook_veto=()      # paneref -> epoch the pane went frozen-and-spinnerless under a hook-set 1
 declare -A pane_hook_veto_logged=() # paneref -> 1 once we've logged that pane's stranded flag
+declare -A pane_hook_seen=()     # paneref -> hook value last folded into pane_busy ("" = no file)
+declare -A pane_sub_seen=()      # paneref -> "0"|"1", the sub signal read alongside pane_hook_seen
+declare -A pane_key_cache=()     # paneref -> hook filename stem; see pane_key
 busy_frame=0                      # index into CCAR_BUSY_GLYPHS, advanced while any pane is working
 poll_registry=""                  # panerefs alive this poll (one registry walk, shared by every consumer)
 poll_panes=""                     # the subset running claude (limit latch + resume + rc)
@@ -290,26 +293,55 @@ socket_attached() { # $1 = socket path; cached for the length of one scan
 }
 
 # Same key convention as register_pane() in bin/cc-run and bin/cc-busy-hook, so
-# all three derive an identical key from one paneref/socket+pane pair.
+# all three derive an identical key from one paneref/socket+pane pair. Cached
+# per paneref: the idle poll reads a hook file per pane per chunk, and a
+# printf|tr per read would be a fork on the path that is supposed to only
+# sleep. The class is tr -c 'A-Za-z0-9._-' '_' , inlined so the fill itself
+# doesn't fork either.
+cache_pane_key() { # $1 = paneref; fills pane_key_cache in THIS shell
+  [ -n "${pane_key_cache[$1]+x}" ] && return 0
+  local raw="${1%%$'\t'*}:${1##*$'\t'}" char out="" i
+  for ((i = 0; i < ${#raw}; i++)); do
+    char="${raw:i:1}"
+    case "$char" in
+      [A-Za-z0-9._-]) out+="$char" ;;
+      *) out+="_" ;;
+    esac
+  done
+  pane_key_cache[$1]="$out"
+}
+
 pane_key() { # $1 = paneref
-  printf '%s:%s' "$(pr_socket "$1")" "$(pr_pane "$1")" | tr -c 'A-Za-z0-9._-' '_'
+  cache_pane_key "$1"
+  printf '%s' "${pane_key_cache[$1]}"
 }
 
 # Primary @ccar_busy signal: the per-pane state bin/cc-busy-hook writes on every
-# UserPromptSubmit/Stop/SessionStart/SessionEnd. Echoes "0"/"1"/"ask", or "" when
-# there is no hook state at all (missing file, unreadable, or garbage) — the
-# caller reads that as "no hook installed for this pane, fall back". Defaults
+# UserPromptSubmit/Stop/SessionStart/SessionEnd. "0"/"1"/"ask", or "" when there
+# is no hook state at all (missing file, unreadable, or garbage) — the caller
+# reads "" as "no hook installed for this pane, fall back". Defaults
 # CCAR_BUSY_DIR the same way bin/cc-busy-hook does: an existing install.sh never
 # overwrites a user's config.sh, so an install from before this knob existed
 # has none, and set -u would make an unset reference here an error.
-read_hook_busy() { # $1 = paneref
-  local f state
-  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$1")"
-  [ -f "$f" ] || return 0
-  IFS=$'\t' read -r state _ <"$f" 2>/dev/null
-  case "$state" in
-    0|1|ask) printf '%s' "$state" ;;
-  esac
+# load_hook_busy writes the caller's variable. The idle poll uses it in the
+# main shell; read_hook_busy is that read plus a printf, for $(...) callers.
+load_hook_busy() { # $1 = paneref, $2 = varname to set (0|1|ask|"")
+  local f state="" val=""
+  cache_pane_key "$1"
+  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/${pane_key_cache[$1]}"
+  if [ -f "$f" ]; then
+    IFS=$'\t' read -r state _ <"$f" 2>/dev/null || true
+    case "$state" in
+      0|1|ask) val="$state" ;;
+    esac
+  fi
+  printf -v "$2" '%s' "$val"
+}
+
+read_hook_busy() { # $1 = paneref; echoes load_hook_busy's value
+  local out
+  load_hook_busy "$1" out
+  printf '%s' "$out"
 }
 
 # Second hook signal for the same pane: how many subagents are running, kept by
@@ -318,12 +350,21 @@ read_hook_busy() { # $1 = paneref
 # are not" a decidable state — the pane's own subagent panel is a TUI element
 # with no text worth matching, and it paints a spinner the scrape cannot tell
 # apart from a turn of the main agent's own.
+load_hook_sub() { # $1 = paneref, $2 = varname to set ("0"|"1")
+  local f n="" val=0
+  cache_pane_key "$1"
+  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/${pane_key_cache[$1]}.sub"
+  if [ -f "$f" ]; then
+    IFS=$'\t' read -r n _ <"$f" 2>/dev/null || true
+    case "$n" in ''|0|*[!0-9]*) val=0 ;; *) val=1 ;; esac
+  fi
+  printf -v "$2" '%s' "$val"
+}
+
 read_hook_sub() { # $1 = paneref
-  local f n
-  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$1").sub"
-  [ -f "$f" ] || { printf '0'; return; }
-  IFS=$'\t' read -r n _ <"$f" 2>/dev/null
-  case "$n" in ''|0|*[!0-9]*) printf '0' ;; *) printf '1' ;; esac
+  local out
+  load_hook_sub "$1" out
+  printf '%s' "$out"
 }
 
 # Pure decision for @ccar_busy, split out of publish_busy so it can be unit
@@ -403,6 +444,11 @@ publish_busy() { # $1 = paneref
   local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title
   hook="$(read_hook_busy "$pr")"
   sub="$(read_hook_sub "$pr")"
+  # What this publish folded in. The idle refresh republishes only when a hook
+  # file has moved since — a stale clear leaves the file at 1 while the glyph
+  # goes idle, and that must not read as "hook went 1" on every later chunk.
+  pane_hook_seen[$pr]="$hook"
+  pane_sub_seen[$pr]="$sub"
   [ -n "${pane_parked[$pr]:-}" ] && limited=1
   socket_attached "$(pr_socket "$pr")" && att=1
   cmd="$(txp "$pr" display-message -p -t "$(pr_pane "$pr")" '#{pane_current_command}' 2>/dev/null)"
@@ -546,34 +592,132 @@ publish_any_busy() {
   done
 }
 
+# True when some watched pane is in a state the frame loop animates. Ignores
+# attachment: busy_sockets applies that filter, and its sort pipeline forks,
+# which the idle path must not pay.
+any_animated_mark() {
+  local p
+  for p in "${!pane_busy[@]}"; do
+    case "${pane_busy[$p]}" in 1|sub) return 0 ;; esac
+  done
+  return 1
+}
+
+# True when the idle refresh should publish_busy this pane. Hook files only —
+# a capture is the animated refresh's job (frozen/stale clear) and the scan's
+# (a hook-less turn: background-task notification, no hook fired).
+hook_needs_publish() { # $1 = paneref
+  local pr="$1" published hook sub want
+  published="${pane_busy[$pr]:-}"
+  # The hourglass comes from pane_parked, not from a hook file. Once it is
+  # showing, a hook that says 0 or 1 must not drag the pane into a capture
+  # every chunk. Until it is showing, one publish catches the glyph up — the
+  # scan latches parked after it has already published.
+  if [ -n "${pane_parked[$pr]:-}" ]; then
+    [ "$published" = limit ] && return 1
+    return 0
+  fi
+  load_hook_busy "$pr" hook
+  load_hook_sub "$pr" sub
+  if [ -n "${pane_hook_seen[$pr]+x}" ]; then
+    # Last publish already folded these files in, including a stale clear that
+    # left the file at 1 while the glyph went idle.
+    if [ "$hook" != "${pane_hook_seen[$pr]}" ] || [ "$sub" != "${pane_sub_seen[$pr]:-}" ]; then
+      return 0
+    fi
+    return 1
+  fi
+  # No publish has recorded the files yet. Compare them to the busy value
+  # already stored (the scan writes that) so an unchanged idle pane is free.
+  want=0
+  [ "$hook" = ask ] && want=ask
+  [ "$want" = 0 ] && [ "$hook" = 1 ] && want=1
+  [ "$want" = 0 ] && [ "$sub" = 1 ] && want=sub
+  [ "$published" != "$want" ]
+}
+
+# Main shell, not a substitution: publish_busy writes pane_busy, and a subshell
+# would drop that (same reason publish_any_busy must not be called from $()).
+refresh_idle_hooks() { # 0 if at least one pane was republished
+  local p changed=0
+  for p in "${!pane_busy[@]}"; do
+    hook_needs_publish "$p" || continue
+    publish_busy "$p"
+    changed=1
+  done
+  [ "$changed" = 1 ] || return 1
+  publish_any_busy
+  return 0
+}
+
+sleep_ms() { # $1 = milliseconds. printf -v, so the only fork is sleep itself.
+  local sec=$(( $1 / 1000 )) frac
+  printf -v frac '%03d' $(( $1 % 1000 ))
+  sleep "$sec.$frac"
+}
+
 # The poll sleep, spent animating the spinner instead of idling. Claude's own
 # glyph cycle is the point — a working session should read the same in the window
 # list as it does in the pane. One batched tmux call per server per frame keeps
 # that affordable, and @ccar_spin is a SERVER option (not per-window) so the cost
-# is per server rather than per working pane. Falls back to a plain sleep when
-# nothing is working, so an all-idle box is exactly as quiet as it was before.
+# is per server rather than per working pane.
+#
+# While nothing is animated this does not touch tmux. It sleeps in
+# CCAR_BUSY_REFRESH_MS chunks — the poll is still CCAR_POLL_SECONDS — and reads
+# hook files only, calling publish_busy for a pane whose hook state moved (1,
+# ask, or a subagent count). A capture per pane per chunk is the cost this path
+# avoids. decide_busy's frozen/stale clear still needs that capture, so once a
+# pane is animating the refresh goes back to publish_busy on every pane. A
+# hook-less turn never changes a hook file; scan_panes's publish_busy is what
+# catches it, up to a poll later. Animation off, or no watched pane, is one
+# plain sleep.
 poll_sleep() {
-  local step_ms="${CCAR_BUSY_ANIM_MS:-400}" frames socks i socket nap every p
+  local step_ms="${CCAR_BUSY_ANIM_MS:-400}"
+  local refresh_ms="${CCAR_BUSY_REFRESH_MS:-2000}"
   if [ "$step_ms" -le 0 ] || [ -z "${CCAR_BUSY_GLYPHS:-}" ] || [ "${#pane_busy[@]}" -eq 0 ]; then
     sleep "$CCAR_POLL_SECONDS"; return
   fi
-  frames=$(( CCAR_POLL_SECONDS * 1000 / step_ms ))
-  [ "$frames" -gt 0 ] || frames=1
-  nap="$(printf '%d.%03d' $((step_ms / 1000)) $((step_ms % 1000)))"
-  # How often, in frames, to re-read who is working. The full scan is far too
-  # expensive to run at the rate the indicator wants to be fresh (it re-reads
-  # state.json and runs the rc check), so the two are decoupled: this loop
-  # re-reads only the pane colours, which is one capture per attached pane.
-  every=$(( ${CCAR_BUSY_REFRESH_MS:-2000} / step_ms ))
+  # A 0 here would busy-loop the idle chunk. The animated grid already treats
+  # it as "every frame" (every < 1 collapses to 1).
+  [ "$refresh_ms" -gt 0 ] || refresh_ms=$step_ms
+  local budget_ms=$(( CCAR_POLL_SECONDS * 1000 ))
+  local elapsed=0 every=$(( refresh_ms / step_ms )) i=0 chunk socks="" p socket
   [ "$every" -gt 0 ] || every=1
-  socks="$(busy_sockets)"
-  for ((i = 0; i < frames; i++)); do
+  any_animated_mark && socks="$(busy_sockets)"
+  while [ "$elapsed" -lt "$budget_ms" ]; do
+    if [ -z "$socks" ]; then
+      if refresh_idle_hooks; then
+        socks=""
+        any_animated_mark && socks="$(busy_sockets)"
+      fi
+      if [ -z "$socks" ]; then
+        chunk=$(( budget_ms - elapsed ))
+        [ "$chunk" -gt "$refresh_ms" ] && chunk=$refresh_ms
+        [ "$chunk" -gt 0 ] || break
+        sleep_ms "$chunk"
+        elapsed=$(( elapsed + chunk ))
+        continue
+      fi
+      # Hook check just published. This is the frame-0 boundary, so the block
+      # below does not capture every pane a second time.
+      i=0
+    fi
     if [ $(( i % every )) -eq 0 ]; then
+      # i == 0 was just published by scan_panes, or by the hook check above.
       [ "$i" -gt 0 ] && for p in "${!pane_busy[@]}"; do publish_busy "$p"; done
       publish_any_busy
-      socks="$(busy_sockets)"
+      socks=""
+      any_animated_mark && socks="$(busy_sockets)"
+      if [ -z "$socks" ]; then
+        i=0
+        continue
+      fi
     fi
-    if [ -z "$socks" ]; then sleep "$nap"; continue; fi   # nothing working: idle out the rest
+    # An all-animated poll is an integer number of frames — floor(poll/frame),
+    # no short pad. The idle poll is the one that fills CCAR_POLL_SECONDS.
+    if [ $(( budget_ms - elapsed )) -lt "$step_ms" ]; then
+      break
+    fi
     busy_frame=$(( busy_frame + 1 )); stats_frames=$(( stats_frames + 1 ))
     while IFS= read -r socket; do
       [ -n "$socket" ] || continue
@@ -582,7 +726,9 @@ poll_sleep() {
         set-option -g @ccar_grok_spin "$(busy_glyph "$busy_frame" "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
         refresh-client -S 2>/dev/null
     done <<<"$socks"
-    sleep "$nap"
+    sleep_ms "$step_ms"
+    elapsed=$(( elapsed + step_ms ))
+    i=$(( i + 1 ))
   done
 }
 
@@ -1296,7 +1442,8 @@ scan_panes() {
     case "$live" in
       *$'\n'"$p"$'\n'*) ;;
       *)
-        unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]' 'pane_kind[$p]'
+        unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]' 'pane_kind[$p]' \
+          'pane_hook_seen[$p]' 'pane_sub_seen[$p]'
         busy_file="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")"
         rm -f "$busy_file" "$busy_file.sub" "$(dirname "$busy_file")/.$(basename "$busy_file").sublock" 2>/dev/null
         ;;

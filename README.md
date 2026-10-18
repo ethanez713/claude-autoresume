@@ -377,7 +377,7 @@ Set `CCAR_BUSY_TITLE_FORMAT=""` to leave the terminal title alone, or
 
 ```bash
 tests/busy_hook_test.sh     # hook parsing + decide_busy, pure functions
-tests/busy_glyph_test.sh    # glyph-frame maths, pure functions
+tests/busy_glyph_test.sh    # glyph-frame maths and the idle poll (tmux stubbed)
 tests/busy_format_test.sh   # format splicing + rendering, scratch tmux
 tests/busy_glyph_e2e.sh     # a real monitor.sh drives the tab, incl. re-patch after a rebuild
 ```
@@ -396,16 +396,23 @@ The idle case is the one that matters — this tool exists for sessions you walk
 away from — and three things keep it cheap. **Nothing paints when no client is
 attached:** the colour capture and the animation are both skipped for a server
 nobody is looking at. **The scan interval is decoupled from the indicator:**
-`CCAR_POLL_SECONDS` (15s) governs only limit detection, which needn't be quick —
-the resume fires at the reset time read from `state.json`, not at poll
-granularity — while `CCAR_BUSY_REFRESH_MS` (2s) keeps the glyph fresh for a
-fraction of the cost. And **one registry walk serves the whole poll:** asking
-"which panes are alive and running claude" costs two tmux round-trips per pane,
-and three different consumers used to ask independently.
+`CCAR_POLL_SECONDS` (15s) governs limit detection and the full pane capture,
+which needn't be quick — the resume fires at the reset time read from
+`state.json`, not at poll granularity. Between scans, while nothing is
+animating, the monitor sleeps in `CCAR_BUSY_REFRESH_MS` (2s) chunks and reads
+only hook files. It calls tmux for a pane only when that hook state changed (a
+turn, a dialog, or subagents); an unchanged idle pane costs no tmux at all. A
+hook-less turn — a background-task notification resumes a session without
+firing any hook — waits for the next scan, up to one poll. While a pane is
+animating, that same 2s tick is a capture per attached pane again, so a frozen
+spinnerless screen can still clear a stranded hook flag. And **one registry
+walk serves the whole poll:** asking "which panes are alive and running claude"
+costs two tmux round-trips per pane, and three different consumers used to ask
+independently.
 
-To trim further: raise `CCAR_BUSY_REFRESH_MS` (the dominant remaining cost when
-attached), raise `CCAR_POLL_SECONDS`, raise `CCAR_BUSY_ANIM_MS` (or `0` for a
-static glyph), or set `CCAR_BUSY_REGEX=""` to drop the indicator and sit at the
+To trim further: raise `CCAR_POLL_SECONDS` (what an idle box still pays for),
+raise `CCAR_BUSY_ANIM_MS` (or `0` for a static glyph) while a session is
+working, or set `CCAR_BUSY_REGEX=""` to drop the indicator and sit at the
 floor.
 
 ### Resource heartbeat

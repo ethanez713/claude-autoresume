@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Unit tests for the working-vs-idle detector behind the @ccar_busy glyph.
-# Pure function only — no tmux. Run: tests/busy_glyph_test.sh
+# Unit tests for the working-vs-idle detector behind the @ccar_busy glyph,
+# and for the idle poll_sleep (tmux and sleep stubbed). Run: tests/busy_glyph_test.sh
 set -u
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -f "$repo/config.sh" ] && export CCAR_CONFIG="$repo/config.sh" \
@@ -92,6 +92,122 @@ CCAR_GROK_BUSY_GLYPHS='⠹ ⠼ ⠧ ⠏'
 check "grok frame 0 is the first 4-pip glyph" '⠹' "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")"
 check "grok frame 3 is the last 4-pip glyph"  '⠏' "$(busy_glyph 3 "$CCAR_GROK_BUSY_GLYPHS")"
 check "grok frame 4 wraps to the start"       '⠹' "$(busy_glyph 4 "$CCAR_GROK_BUSY_GLYPHS")"
+
+echo "idle poll_sleep touches tmux only when a hook file moves"
+# Stub tmux and sleep the way publish_busy's tests stub txp: the functions
+# under test call them as commands, so a shell function replaces the binary
+# for the rest of this file. sleep records the argument and returns, so a
+# poll finishes without waiting out CCAR_POLL_SECONDS.
+idle_dir="$(mktemp -d)"
+trap 'rm -rf "$idle_dir"' EXIT
+CCAR_BUSY_DIR="$idle_dir"
+CCAR_BUSY_REGEX='x'
+CCAR_BUSY_GLYPHS='✻ *'
+CCAR_BUSY_ANIM_MS=400
+CCAR_BUSY_REFRESH_MS=2000
+CCAR_POLL_SECONDS=5
+tmux_n=0
+tmux_log=""
+sleep_args=""
+tmux() { tmux_n=$((tmux_n + 1)); tmux_log+="$*"$'\n'; }
+sleep() { sleep_args+="$1"$'\n'; }
+
+sock="/tmp/tmux-test/idle"
+prA="$sock"$'\t'"%11"
+prB="$sock"$'\t'"%22"
+prC="$sock"$'\t'"%33"
+keyA="$(pane_key "$prA")"
+keyB="$(pane_key "$prB")"
+keyC="$(pane_key "$prC")"
+printf '0\t1700000000\n' >"$idle_dir/$keyA"
+printf '1\t1700000000\n' >"$idle_dir/$keyB"   # parked panes keep the hourglass
+printf '1\t1700000000\n' >"$idle_dir/$keyC"   # stranded flag, already cleared
+pane_busy=()
+pane_parked=()
+pane_kind=()
+pane_hook_seen=()
+pane_sub_seen=()
+socket_any_busy=()
+attached=()
+pane_busy[$prA]=0
+pane_busy[$prB]=limit
+pane_parked[$prB]=1
+pane_busy[$prC]=0
+pane_hook_seen[$prC]=1          # last publish folded this file in and went idle
+pane_sub_seen[$prC]=0
+
+poll_sleep
+check "unchanged hook files make zero tmux calls" "0" "$tmux_n"
+check "idle poll sleeps in refresh chunks, totalling the poll" $'2.000\n2.000\n1.000\n' "$sleep_args"
+check "parked pane stays on the hourglass" "limit" "${pane_busy[$prB]}"
+check "a stranded hook already cleared stays idle" "0" "${pane_busy[$prC]}"
+
+tmux_n=0
+tmux_log=""
+sleep_args=""
+printf '1\t1700000000\n' >"$idle_dir/$keyA"
+poll_sleep
+check "hook flipping to 1 publishes that pane" "1" "${pane_busy[$prA]}"
+case "$tmux_log" in
+  *"-t %11"*) ok "hook flip calls tmux for that pane" ;;
+  *) bad "hook flip calls tmux for that pane" ;;
+esac
+case "$tmux_log" in
+  *"-t %22"*) bad "parked pane is not republished when another hook flips" ;;
+  *) ok "parked pane is not republished when another hook flips" ;;
+esac
+case "$tmux_log" in
+  *"-t %33"*) bad "stranded hook is not republished when another hook flips" ;;
+  *) ok "stranded hook is not republished when another hook flips" ;;
+esac
+case "$sleep_args" in
+  *"0.400"*) bad "a detached hook flip does not start the frame loop" ;;
+  *) ok "a detached hook flip does not start the frame loop" ;;
+esac
+
+# Seen was recorded by the publish above. A second poll with the file still at
+# 1 must not capture again.
+tmux_n=0
+tmux_log=""
+poll_sleep
+check "hook that stays 1 does not publish again" "0" "$tmux_n"
+
+pane_busy[$prA]=0
+unset 'pane_hook_seen[$prA]' 'pane_sub_seen[$prA]'
+printf 'ask\t1700000000\n' >"$idle_dir/$keyA"
+tmux_n=0
+poll_sleep
+check "hook ask publishes ask" "ask" "${pane_busy[$prA]}"
+
+pane_busy[$prA]=0
+unset 'pane_hook_seen[$prA]' 'pane_sub_seen[$prA]'
+printf '0\t1700000000\n' >"$idle_dir/$keyA"
+printf '2\t1700000000\n' >"$idle_dir/$keyA.sub"
+tmux_n=0
+poll_sleep
+check "subagent count publishes sub" "sub" "${pane_busy[$prA]}"
+rm -f "$idle_dir/$keyA.sub"
+
+echo "animated poll_sleep still frames"
+pane_busy=()
+pane_parked=()
+socket_any_busy=()
+attached=()
+pane_busy[$prA]=1
+pane_hook_seen[$prA]=1
+pane_sub_seen[$prA]=0
+printf '1\t1700000000\n' >"$idle_dir/$keyA"
+socket_attached() { return 0; }   # this server has a client, so the spinner runs
+CCAR_POLL_SECONDS=1
+tmux_n=0
+tmux_log=""
+sleep_args=""
+poll_sleep
+case "$tmux_log" in
+  *"@ccar_spin"*) ok "a working attached pane advances the spinner" ;;
+  *) bad "a working attached pane advances the spinner" ;;
+esac
+check "animated poll sleeps in frames, not refresh chunks" $'0.400\n0.400\n' "$sleep_args"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
