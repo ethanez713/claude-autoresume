@@ -70,6 +70,8 @@ poll_panes=""                     # the subset running claude (limit latch + res
 poll_busy=""                      # poll_panes plus grok panes on those sockets (glyphs only)
 stats_last_ts=0; stats_last_cpu=0; stats_polls=0; stats_frames=0
 status_active=0                   # 1 while a countdown is painted in status-right, so we can wipe it when the limit clears on its own
+last_scan_epoch=0                 # raw epoch of the last scan_panes; deep idle's hourly backstop
+deep_idle_fd=""                   # fifo for the fork-free quiet pause; see ensure_deep_idle_fd
 
 # --- clock reconciliation ----------------------------------------------------
 # On WSL2 (and some VMs) the guest clock can freeze in the past when the host
@@ -517,13 +519,18 @@ cpu_ticks() {
 # One wide event per window answering "what is this costing, and on what". Not a
 # counter: the shape (how many panes, how many attached, how many working) is
 # what makes a surprising cpu_pct actionable rather than just alarming.
-stats_emit() {
+stats_emit() { # $1 = force — close the window even when it is shorter than CCAR_STATS_SECONDS
   local every="${CCAR_STATS_SECONDS:-300}"
   [ "$every" -gt 0 ] 2>/dev/null || return 0
   local now; now=$(date +%s)
   if [ "$stats_last_ts" -eq 0 ]; then stats_last_ts=$now; stats_last_cpu=$(cpu_ticks); return 0; fi
-  [ $(( now - stats_last_ts )) -ge "$every" ] || return 0
-  local wall=$(( now - stats_last_ts )) t; t=$(cpu_ticks)
+  local wall=$(( now - stats_last_ts ))
+  if [ "${1:-}" != force ]; then
+    [ "$wall" -ge "$every" ] || return 0
+  fi
+  # Two closes in the same second have nothing to report and would divide by zero.
+  [ "$wall" -gt 0 ] || return 0
+  local t; t=$(cpu_ticks)
   local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 sub=0 att=0 k
   pct10=$(( dcpu * 10 / wall ))          # ticks are 10ms, so ticks/second IS percent-of-core
   for k in "${!pane_busy[@]}"; do
@@ -1450,6 +1457,7 @@ scan_panes() {
     esac
   done
   publish_any_busy    # poll_sleep skips its own call when the animation is off
+  idle_epoch last_scan_epoch   # deep idle's hourly backstop is measured from this scan
 }
 
 # Resume gate, evaluated per latched pane at reset time. Resume when:
@@ -1481,6 +1489,101 @@ should_resume() { # $1 = paneref
 
 count() { [ -z "$1" ] && echo 0 || grep -c . <<<"$1"; }
 
+# Seconds since the epoch, no fork. The quiet loop must not call `date`.
+idle_epoch() { printf -v "$1" '%(%s)T' -1; }
+
+# /dev/null is at EOF, so a timed read on it returns at once. A fifo opened
+# read-write and never written has no EOF and no data, so read -t blocks for
+# the whole timeout. One fd for the life of the process.
+ensure_deep_idle_fd() {
+  [ -n "$deep_idle_fd" ] && return 0
+  local fifo
+  fifo="$(mktemp -u -p "${TMPDIR:-/tmp}" ccar-idle.XXXXXX)" || return 1
+  mkfifo "$fifo" || return 1
+  exec {deep_idle_fd}<>"$fifo" || { rm -f "$fifo"; return 1; }
+  rm -f "$fifo"
+}
+idle_pause() { read -t "$1" -u "$deep_idle_fd" || true; } # $1 = seconds, fractional ok
+
+# True when .activity is old enough that a quiet monitor may stop scanning.
+# A missing stamp means hooks are not reporting, so the poll stays on.
+activity_is_quiet() {
+  local act now mtime need="${CCAR_DEEP_IDLE_AFTER_SECONDS:-300}"
+  act="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/.activity"
+  [ -f "$act" ] || return 1
+  idle_epoch now
+  mtime=$(stat -c %Y "$act" 2>/dev/null) || return 1
+  [ $(( now - mtime )) -ge "$need" ]
+}
+
+# Every watched pane published idle, nothing latched, no rc failure in
+# progress, and no recent hook. ask/limit/sub/1 all keep the normal poll:
+# a dialog, a parked limit, and a live turn still need it.
+deep_idle_ready() {
+  [ "${#pane_busy[@]}" -gt 0 ] || return 1
+  local p
+  for p in "${!pane_busy[@]}"; do
+    [ "${pane_busy[$p]}" = 0 ] || return 1
+  done
+  [ "${#pane_latch[@]}" -eq 0 ] || return 1
+  [ "${#rc_failed_since[@]}" -eq 0 ] || return 1
+  activity_is_quiet
+}
+
+# Block until a hook touches .activity, the wall clock jumps (suspend/resume),
+# the hourly backstop elapses, or the operator cancels. No tmux, no date, no
+# sleep: the pause is a timed read on the fifo above.
+deep_idle_wait() {
+  ensure_deep_idle_fd || return 0
+  local refresh_ms="${CCAR_BUSY_REFRESH_MS:-2000}"
+  [ "$refresh_ms" -gt 0 ] 2>/dev/null || refresh_ms=2000
+  local budget="${CCAR_DEEP_IDLE_SCAN_SECONDS:-3600}"
+  local sec=$(( refresh_ms / 1000 )) ms=$(( refresh_ms % 1000 ))
+  local chunk step_s
+  printf -v chunk '%d.%03d' "$sec" "$ms"
+  # Same overrun test as wait_until (step + 30). A sub-second chunk still
+  # counts as one second so a second-boundary tick is not a suspend.
+  step_s=$sec
+  [ "$step_s" -lt 1 ] && step_s=1
+  local dir="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}"
+  local act="$dir/.activity" marker="$dir/.idle-mark"
+  # An event that lands while the marker is created has to wake us. -nt
+  # compares against the marker, so a touch that finishes before the marker
+  # exists would otherwise sleep until the next event or the hourly scan, and
+  # that touch may be the only UserPromptSubmit of a long turn.
+  local stamp stamp2
+  stamp=$(stat -c %y "$act" 2>/dev/null) || return 0
+  : >"$marker" 2>/dev/null || return 0
+  stamp2=$(stat -c %y "$act" 2>/dev/null) || return 0
+  [ "$stamp" = "$stamp2" ] || return 0
+  local now before after
+  while :; do
+    [ -e "$CANCEL_FILE" ] && return 0
+    [ -f "$act" ] && [ "$act" -nt "$marker" ] && return 0
+    idle_epoch now
+    [ $(( now - last_scan_epoch )) -ge "$budget" ] && return 0
+    idle_epoch before
+    idle_pause "$chunk"
+    idle_epoch after
+    if [ $(( after - before )) -gt $(( step_s + 30 )) ]; then
+      log "wall clock jumped ~$((after - before - step_s))s during deep idle (machine likely slept) — reconciling clock and scanning"
+      reconcile_clock force
+      return 0
+    fi
+  done
+}
+
+# Enter and leave each close the stats window, so the quiet stretch is its own
+# near-zero sample instead of being folded into the next hour. Clearing
+# rc_last_check makes the following rc_check ignore its 30s gate: the bridge
+# can fail while we are asleep, and the previous check may be only a poll ago.
+run_deep_idle() {
+  stats_emit force
+  deep_idle_wait
+  stats_emit force
+  rc_last_check=0
+}
+
 # When sourced (tests), expose the functions but don't enter the loop.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
@@ -1495,10 +1598,19 @@ while :; do
     log "cancelled by operator — monitor exiting (cc-run restarts it)"
     exit 0
   fi
+  if deep_idle_ready; then
+    run_deep_idle
+    # Cancel is handled at the top. A wake for it must not scan first.
+    [ -e "$CANCEL_FILE" ] && continue
+  fi
   # No registered pane still alive? Allow a grace window (covers launch races and
   # cutover) before exiting — the next `claude` launch restarts the monitor.
   refresh_poll_panes
   if [ -z "$poll_registry" ]; then
+    # A dead pane left at published 0 still satisfies deep idle, which skips
+    # this check. Drop it so the grace timer keeps running. SessionEnd's stamp
+    # is what wakes a quiet monitor to notice the pane is gone.
+    pane_busy=()
     now=$(date +%s)
     [ "$idle_since" -eq 0 ] && idle_since=$now
     if [ $((now - idle_since)) -ge "${CCAR_IDLE_EXIT_SECONDS:-60}" ]; then

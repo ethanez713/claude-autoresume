@@ -75,6 +75,12 @@ eq "Stop: silent"   "" "$out"
 eq "Stop: exit 0"   "0" "$rc"
 eq "Stop: writes 0" "0" "$(hook_state)"
 
+printf '1\t1700000000\n' >"$busy_dir/$key"
+out="$(run_hook StopFailure 2>&1)"; rc=$?
+eq "StopFailure: silent"   "" "$out"
+eq "StopFailure: exit 0"   "0" "$rc"
+eq "StopFailure: writes 0" "0" "$(hook_state)"
+
 out="$(run_hook SubagentStart 2>&1)"; rc=$?
 eq "SubagentStart: silent"       "" "$out"
 eq "SubagentStart: exit 0"       "0" "$rc"
@@ -130,6 +136,9 @@ printf 'ask\t1700000000\n' >"$busy_dir/$key"
 run_hook Stop
 eq "Stop: clears ask"                "0" "$(hook_state)"
 printf 'ask\t1700000000\n' >"$busy_dir/$key"
+run_hook StopFailure
+eq "StopFailure: clears ask"         "0" "$(hook_state)"
+printf 'ask\t1700000000\n' >"$busy_dir/$key"
 run_hook UserPromptSubmit
 eq "UserPromptSubmit: clears ask"    "1" "$(hook_state)"
 
@@ -138,6 +147,32 @@ out="$(run_hook SomeOtherEvent 2>&1)"; rc=$?
 eq "unknown event: silent"         "" "$out"
 eq "unknown event: exit 0"         "0" "$rc"
 eq "unknown event: no-op"          "1" "$(hook_state)"
+rm -f "$busy_dir/$key"
+
+echo "activity stamp"
+act="$busy_dir/.activity"
+for ev in UserPromptSubmit Stop StopFailure SubagentStart SubagentStop \
+          SessionStart SessionEnd PermissionRequest PreToolUse \
+          PostToolUse PostToolUseFailure SomeOtherEvent; do
+  rm -f "$act"
+  run_hook "$ev" >/dev/null
+  if [ -f "$act" ]; then ok "$ev touches .activity"; else bad "$ev touches .activity"; fi
+done
+rm -f "$busy_dir/$key" "$act"
+run_hook PostToolUse >/dev/null
+eq "PostToolUse with no state file writes none" "(none)" "$(hook_state)"
+if [ -f "$act" ]; then ok "PostToolUse with no state file still stamps"; else bad "PostToolUse with no state file still stamps"; fi
+printf '0\t1700000000\n' >"$busy_dir/$key"
+rm -f "$act"
+run_hook PostToolUse >/dev/null
+eq "PostToolUse leaves an idle pane at 0" "0" "$(hook_state)"
+if [ -f "$act" ]; then ok "PostToolUse that writes nothing still stamps"; else bad "PostToolUse that writes nothing still stamps"; fi
+run_hook UserPromptSubmit >/dev/null
+t1="$(stat -c %y "$act")"
+run_hook PostToolUse >/dev/null
+t2="$(stat -c %y "$act")"
+eq "PostToolUse leaves the running turn at 1" "1" "$(hook_state)"
+if [ "$t1" != "$t2" ]; then ok "a later event refreshes the stamp"; else bad "a later event refreshes the stamp"; fi
 rm -f "$busy_dir/$key"
 
 out="$(TMUX="$socket,999,0" TMUX_PANE="" CCAR_CONFIG="$hook_config" \

@@ -258,17 +258,20 @@ window whose name is missing the anchor gets no glyph at all.
 
 **The signal is hook-driven, not scraped.** `./install.sh` writes the hooks
 into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
-`UserPromptSubmit` (a turn started), `Stop` (it ended), `SubagentStart` /
+`UserPromptSubmit` (a turn started), `Stop` and `StopFailure` (it ended, the
+latter on an API error), `SubagentStart` /
 `SubagentStop` (a subagent came or went), `SessionStart` (clears flags stranded
 by a previous session in this pane, and tells the monitor hooks are live here),
-and `SessionEnd` (drops the pane's state entirely). The first two write a single
-`0`/`1` to a per-pane file in `CCAR_BUSY_DIR`; `PermissionRequest` and a
-`PreToolUse` scoped to `AskUserQuestion|ExitPlanMode` write `ask` there while a
+and `SessionEnd` (drops the pane's state entirely). A turn start writes `1`
+and both stops write `0` to a per-pane file in `CCAR_BUSY_DIR`;
+`PermissionRequest` and a `PreToolUse` scoped to `AskUserQuestion|ExitPlanMode`
+write `ask` there while a
 dialog waits on you (the window shows `CCAR_ASK_GLYPH`, and the stale-clear below
 never applies to it), and the first `PostToolUse`/`PostToolUseFailure` after it
 puts the `1` back; the subagent pair keeps a count
 beside it, under an `flock` because a fan-out starts several in the same instant.
-The monitor reads both via `read_hook_busy()` and `read_hook_sub()`.
+The monitor reads both via `read_hook_busy()` and `read_hook_sub()`. Every event
+also touches `.activity` in that directory, which is what wakes a quiet monitor.
 
 Neither signal is trusted alone, because each is wrong in one direction. The
 scrape false-negatives constantly: while a tool call runs, the pane paints the
@@ -384,42 +387,63 @@ tests/busy_glyph_e2e.sh     # a real monitor.sh drives the tab, incl. re-patch a
 
 ### Cost
 
-Measured on this box (one bash loop, no daemon, no network), as a share of one core:
+Share of one core, one bash loop, no daemon, no network. The quiet row is the
+shape of the loop (blocked in `read`, nothing spawned). The other two are
+measured on this box:
 
 | state | cost |
 |---|---|
-| walked away / detached | **~1.1%** |
-| attached, everything idle | ~1.1% |
-| attached, a session working (animating) | ~4.3% |
+| quiet | **~0** |
+| idle, but a hook fired recently | ~1.1% |
+| a session working (animating) | ~4.3% |
 
-The idle case is the one that matters — this tool exists for sessions you walk
-away from — and three things keep it cheap. **Nothing paints when no client is
-attached:** the colour capture and the animation are both skipped for a server
-nobody is looking at. **The scan interval is decoupled from the indicator:**
-`CCAR_POLL_SECONDS` (15s) governs limit detection and the full pane capture,
-which needn't be quick — the resume fires at the reset time read from
+Quiet is the steady state of a session you walked away from: every watched
+pane's published state is idle (no turn, subagents, dialog, or rate-limit
+park), nothing is latched, no remote-control failure is being tracked, and no
+hook has fired for `CCAR_DEEP_IDLE_AFTER_SECONDS` (5 min). The monitor then
+stops scanning. It sleeps in `CCAR_BUSY_REFRESH_MS` (2s) chunks on a builtin
+`read` timeout — no `sleep`, no `date`, no tmux — until any hook touches
+`$CCAR_BUSY_DIR/.activity` (a `PostToolUse` that writes no state, a `SessionEnd`,
+an event the hook does not recognise), the wall clock jumps because the laptop
+resumed from sleep (that forces a clock reconcile), or
+`CCAR_DEEP_IDLE_SCAN_SECONDS` (1 hour) has passed since the last scan. The wake
+runs one full scan, and the remote-control check ignores its 30s gate for that
+pass. `SessionEnd` touches the stamp, which is what wakes a quiet monitor so
+the no-pane exit can see the pane is gone.
+
+Until that quiet threshold, and whenever a pane is animating, asking, limited,
+or an rc failure is open, the monitor keeps the poll. **Nothing paints when no
+client is attached:** the colour capture and the animation are both skipped for
+a server nobody is looking at. **The scan interval is decoupled from the
+indicator:** `CCAR_POLL_SECONDS` (15s) governs limit detection and the full pane
+capture, which needn't be quick — the resume fires at the reset time read from
 `state.json`, not at poll granularity. Between scans, while nothing is
 animating, the monitor sleeps in `CCAR_BUSY_REFRESH_MS` (2s) chunks and reads
 only hook files. It calls tmux for a pane only when that hook state changed (a
 turn, a dialog, or subagents); an unchanged idle pane costs no tmux at all. A
 hook-less turn — a background-task notification resumes a session without
-firing any hook — waits for the next scan, up to one poll. While a pane is
+firing any hook — waits for the next scan: up to one poll while the monitor is
+still polling, or up to the hourly backstop once it is quiet. While a pane is
 animating, that same 2s tick is a capture per attached pane again, so a frozen
-spinnerless screen can still clear a stranded hook flag. And **one registry
-walk serves the whole poll:** asking "which panes are alive and running claude"
-costs two tmux round-trips per pane, and three different consumers used to ask
-independently.
+spinnerless screen can still clear a stranded hook flag. **One registry walk
+serves the whole poll:** asking "which panes are alive and running claude"
+costs two tmux round-trips per pane, and the scan, the rc check, and the
+idle-exit check share it.
 
-To trim further: raise `CCAR_POLL_SECONDS` (what an idle box still pays for),
-raise `CCAR_BUSY_ANIM_MS` (or `0` for a static glyph) while a session is
-working, or set `CCAR_BUSY_REGEX=""` to drop the indicator and sit at the
-floor.
+A stats row is written on the way into the quiet sleep and on the way back out,
+so that stretch is its own near-zero sample.
+
+To trim further: raise `CCAR_DEEP_IDLE_SCAN_SECONDS` (what a quiet box still
+pays for), raise `CCAR_POLL_SECONDS` for the window before quiet, raise
+`CCAR_BUSY_ANIM_MS` (or `0` for a static glyph) while a session is working, or
+set `CCAR_BUSY_REGEX=""` to drop the indicator.
 
 ### Resource heartbeat
 
-Every `CCAR_STATS_SECONDS` (300) the monitor appends one JSON line to
-`stats.jsonl` in the state dir — its CPU over the window, including every child
-it reaped, alongside the shape it was running against:
+Every `CCAR_STATS_SECONDS` (300), and again when the monitor enters or leaves
+its quiet sleep, it appends one JSON line to `stats.jsonl` in the state dir —
+its CPU over the window, including every child it reaped, alongside the shape
+it was running against:
 
 ```json
 {"ts":"…","window_s":15,"cpu_ms":650,"cpu_pct":4.3,"polls":1,"frames":37,

@@ -7,9 +7,11 @@
 # on stdin; we never read it.
 #
 # Runs synchronously, inline in the user's Claude session, on every
-# UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd and on
-# every PostToolUse — so it must be silent and never fail the hook: no stdout/stderr, always exit 0,
-# whatever else goes wrong.
+# UserPromptSubmit/Stop/StopFailure/SubagentStart/SubagentStop/SessionStart/SessionEnd
+# and on every PostToolUse — so it must be silent and never fail the hook: no
+# stdout/stderr, always exit 0, whatever else goes wrong. StopFailure is a turn
+# that ended on an API error (a rate limit, for one); it clears the flag the
+# same way Stop does.
 set -euo pipefail
 trap 'exit 0' EXIT
 
@@ -56,6 +58,18 @@ write_field() { # $1 = path, $2 = value
 
 write_state() { write_field "$state_file" "$1"; }
 
+# Wake a quiet monitor. Every event, including a PostToolUse that leaves the
+# state file alone and an event we don't recognise. A builtin redirect: no
+# extra fork on the path that already runs on every tool call.
+stamp_activity() {
+  if [ ! -d "$busy_dir" ]; then
+    mkdir -p "$busy_dir" 2>/dev/null || return 0
+    chmod 700 "$busy_dir" 2>/dev/null || true
+  fi
+  umask 077
+  : >"$busy_dir/.activity" 2>/dev/null || return 0
+}
+
 # A fan-out starts several subagents in the same instant, so read-modify-write
 # without a lock silently loses one of the increments and the pane then shows a
 # subagent that finished long ago. flock is best-effort: without it the count is
@@ -79,16 +93,21 @@ bump_subagents() { # $1 = 1 | -1
 # ordinary tool calls from writing at all.
 resume_if_asking() {
   local state
+  # Opening a missing file prints to stderr; bash reports the failed
+  # redirect itself, so the read's 2>/dev/null never sees it.
+  [ -r "$state_file" ] || return 0
   IFS=$'\t' read -r state _ <"$state_file" 2>/dev/null || return 0
   [ "$state" = ask ] && write_state 1
   return 0
 }
 
+stamp_activity
+
 case "$event" in
   UserPromptSubmit) write_state 1 ;;
   PermissionRequest|PreToolUse) write_state ask ;;
   PostToolUse|PostToolUseFailure) resume_if_asking ;;
-  Stop)             write_state 0 ;;
+  Stop|StopFailure) write_state 0 ;;
   SubagentStart)    bump_subagents 1 ;;
   SubagentStop)     bump_subagents -1 ;;
   # A session that died mid-turn, or with subagents still out, leaves this pane's

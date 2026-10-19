@@ -159,7 +159,7 @@ path = os.environ["CCAR_SETTINGS"]
 hook_bin = os.environ["CCAR_HOOK_BIN"]
 # (event, matcher): PreToolUse is scoped to the two tools that open a dialog; the
 # user's own PreToolUse entries carry other matchers and are never touched.
-events = [("UserPromptSubmit", None), ("Stop", None),
+events = [("UserPromptSubmit", None), ("Stop", None), ("StopFailure", None),
           ("SubagentStart", None), ("SubagentStop", None),
           ("SessionStart", None), ("SessionEnd", None),
           ("PermissionRequest", None), ("PostToolUse", None),
@@ -220,7 +220,7 @@ PY
   if [ "$rc" -ne 0 ]; then
     warn "could not patch $CLAUDE_DIR/settings.json with the busy-state hooks."
     info "claude-autoresume still works via the on-screen-text fallback. Add the"
-    info "hooks (UserPromptSubmit/Stop/SubagentStart/SubagentStop/SessionStart/SessionEnd/PermissionRequest/PostToolUse/PostToolUseFailure, and PreToolUse matching AskUserQuestion|ExitPlanMode -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
+    info "hooks (UserPromptSubmit/Stop/StopFailure/SubagentStart/SubagentStop/SessionStart/SessionEnd/PermissionRequest/PostToolUse/PostToolUseFailure, and PreToolUse matching AskUserQuestion|ExitPlanMode -> $here/bin/cc-busy-hook <event>) by hand, or re-run ./install.sh."
   fi
   return 0
 }

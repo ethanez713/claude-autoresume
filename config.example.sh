@@ -146,8 +146,17 @@ CCAR_ASK_GLYPH='❗'
 CCAR_BUSY_ANIM_MS=400
 # How often to re-read which panes are working, independent of the full scan, so
 # the indicator stays fresh without paying for a scan. One capture per attached
-# pane; panes on a server with no client attached cost nothing at all.
+# pane; panes on a server with no client attached cost nothing at all. Also the
+# chunk a quiet monitor sleeps in (see CCAR_DEEP_IDLE_AFTER_SECONDS).
 CCAR_BUSY_REFRESH_MS=2000
+# Once every watched pane is idle, nothing is latched, no remote-control failure
+# is being tracked, and no hook has fired for this long, the monitor stops
+# scanning. It sleeps in CCAR_BUSY_REFRESH_MS chunks until a hook touches
+# $CCAR_BUSY_DIR/.activity, the laptop resumes from sleep, or the backstop below.
+CCAR_DEEP_IDLE_AFTER_SECONDS=300
+# Full scan at least this often while quiet, so a pane that died without
+# SessionEnd, or a turn that resumed without firing a hook, is still noticed.
+CCAR_DEEP_IDLE_SCAN_SECONDS=3600
 # The account is treated as rate-limited when the status line's five-hour
 # used_percentage (in state.json) is at/above this — but only while the reading
 # is inside its validity window (see CCAR_USAGE_FRESH_SECONDS). A valid reading
