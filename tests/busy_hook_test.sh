@@ -240,6 +240,27 @@ eq "a live spinner takes the window back from a parked pane (resumed, no continu
 eq "an unattached parked pane (no live scrape) keeps the hourglass" \
    "limit" "$(decide_busy 0 '' '' '' 0 1)"
 
+echo "decide_busy (a grok job outliving the turn that started it)"
+# Args: hook scrape frozen veto_age sub limited grok
+eq "turn over, grok job running -> grok" \
+   "grok" "$(decide_busy 0 0 1 '' 0 0 1)"
+eq "no job -> idle" \
+   "0" "$(decide_busy 0 0 1 '' 0 0 0)"
+eq "a live turn outranks the job" \
+   "1" "$(decide_busy 1 1 0 '' 0 0 1)"
+eq "a hook-less turn (spinner on screen) outranks the job" \
+   "1" "$(decide_busy 0 1 0 '' 0 0 1)"
+eq "subagents outrank the job" \
+   "sub" "$(decide_busy 0 0 0 '' 1 0 1)"
+eq "a dialog outranks the job" \
+   "ask" "$(decide_busy ask 0 1 '' 0 0 1)"
+eq "a parked pane outranks the job" \
+   "limit" "$(decide_busy 0 0 1 '' 0 1 1)"
+eq "a frozen, spinnerless screen does not disprove a running job" \
+   "grok" "$(decide_busy 1 0 1 45 0 0 1)"
+eq "an unattached pane (no scrape) still shows the job" \
+   "grok" "$(decide_busy 0 '' '' '' 0 0 1)"
+
 
 echo "read_hook_busy: falls back to \$CCAR_STATE_DIR/busy when CCAR_BUSY_DIR is unset"
 default_state_dir="$(mktemp -d)"
@@ -314,6 +335,53 @@ publish_busy "$pr3"
 eq "a parked pane outranks both"               "limit" "${pane_busy[$pr3]:-}"
 unset 'pane_latch[$pr3]' 'pane_parked[$pr3]'
 rm -f "$busy_dir/$key3" "$busy_dir/$key3.sub"
+
+echo "pane_has_grok_job (fake /proc)"
+proc_root="$(mktemp -d)"
+CCAR_PROC_ROOT="$proc_root"
+fake_proc() { # $1 pid, $2 comma-separated children, rest: argv
+  local pid="$1" kids="${2//,/ }"; shift 2
+  mkdir -p "$proc_root/$pid/task/$pid"
+  printf '%s\n' "$kids" >"$proc_root/$pid/task/$pid/children"
+  printf '%s\0' "$@" >"$proc_root/$pid/cmdline"
+}
+CCAR_GROK_MCP_CMDLINE='grok_mcp.py'
+fake_proc 100 200 bash                                  # pane shell
+fake_proc 200 300,301 claude                            # claude, with a sibling MCP server
+fake_proc 300 "" node some-other-mcp.js
+fake_proc 301 "" python3 /x/server/grok_mcp.py          # grok MCP server, idle
+pane_has_grok_job 100; eq "MCP server with no child -> no job" "1" "$?"
+fake_proc 301 400 python3 /x/server/grok_mcp.py
+fake_proc 400 "" bwrap
+pane_has_grok_job 100; eq "MCP server with a child -> job" "0" "$?"
+mkdir -p "$proc_root/301/task/302"; printf '\n' >"$proc_root/301/task/301/children"
+printf '400\n' >"$proc_root/301/task/302/children"
+pane_has_grok_job 100; eq "the child is read from any thread of the server" "0" "$?"
+fake_proc 301 400 python3 /x/server/not_the_server.py
+pane_has_grok_job 100; eq "another process with children is not the MCP server" "1" "$?"
+fake_proc 301 400 python3 /x/server/grok_mcp.py
+CCAR_GROK_MCP_CMDLINE=''
+pane_has_grok_job 100; eq "empty CCAR_GROK_MCP_CMDLINE disables detection" "1" "$?"
+CCAR_GROK_MCP_CMDLINE='grok_mcp.py'
+fake_proc 200 301 claude
+pane_has_grok_job 100; eq "MCP server directly under claude is found" "0" "$?"
+pane_has_grok_job 999; eq "unknown pid -> no job" "1" "$?"
+unset CCAR_PROC_ROOT
+rm -rf "$proc_root"
+
+echo "publish_busy: a grok job under an idle pane"
+pr4="grok-sock"$'\t'"%4"; key4="$(pane_key "$pr4")"
+printf '0\t%s\n' "$(date +%s)" >"$busy_dir/$key4"
+txp() { case "$*" in *pane_current_command*) printf 'claude 4242' ;; esac; }
+test_scrape_working=0
+pane_has_grok_job() { [ "${1:-}" = 4242 ] && [ "$test_grok_job" = 1 ]; }
+test_grok_job=1
+publish_busy "$pr4"
+eq "idle hook, job running -> grok" "grok" "${pane_busy[$pr4]:-}"
+test_grok_job=0
+publish_busy "$pr4"
+eq "job gone -> idle again" "0" "${pane_busy[$pr4]:-}"
+rm -f "$busy_dir/$key4"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -95,13 +95,14 @@ CCAR_BUSY_STALE_SECONDS=20
 # state the monitor publishes in @ccar_busy / @ccar_kind:
 #   1      a turn is running     -> @ccar_spin (claude) / @ccar_grok_spin (grok)
 #   sub    subagents still out   -> @ccar_sub_spin (claude only)
+#   grok   a grok job still runs -> @ccar_grok_job (claude only; static)
 #   ask    a dialog awaits you   -> @ccar_ask (claude only)
 #   limit  parked at the limit   -> @ccar_wait
 #   0      idle                  -> ✳ (claude) / @ccar_grok_idle (grok)
 # The #{m:✳*} guard leaves any window without the anchor — a shell, an editor,
 # anything that isn't a watched pane — exactly as it is. The monitor splices this
 # into window-status-format on whichever tmux server your panes live on.
-CCAR_BUSY_NAME_FORMAT='#{?#{m:✳*,#{window_name}},#{?#{==:#{@ccar_kind},grok},#{?#{==:#{@ccar_busy},1},#{@ccar_grok_spin},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},#{@ccar_grok_idle}}},#{?#{==:#{@ccar_busy},ask},#{@ccar_ask},#{?#{==:#{@ccar_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},✳}}}}}#{s|^✳||:#{window_name}},#{window_name}}'
+CCAR_BUSY_NAME_FORMAT='#{?#{m:✳*,#{window_name}},#{?#{==:#{@ccar_kind},grok},#{?#{==:#{@ccar_busy},1},#{@ccar_grok_spin},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},#{@ccar_grok_idle}}},#{?#{==:#{@ccar_busy},ask},#{@ccar_ask},#{?#{==:#{@ccar_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_busy},grok},#{@ccar_grok_job},#{?#{==:#{@ccar_busy},limit},#{@ccar_wait},✳}}}}}}#{s|^✳||:#{window_name}},#{window_name}}'
 # The same swap for the terminal's own title — the tab, and the taskbar entry
 # that is all you can see of a session whose window isn't in front. That title
 # belongs to whichever pane is active, so it cannot key on the per-window
@@ -111,7 +112,7 @@ CCAR_BUSY_NAME_FORMAT='#{?#{m:✳*,#{window_name}},#{?#{==:#{@ccar_kind},grok},#
 # only thing left is a wait, and a ✳ still means nothing is happening at all. The
 # monitor splices this into set-titles-string (and turns set-titles on). Set
 # empty to leave the title alone.
-CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},ask},#{@ccar_ask},#{?#{==:#{@ccar_any_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_any_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_any_busy},limit},#{@ccar_wait},✳}}}}#{s|^✳||:#{pane_title}},#{pane_title}}'
+CCAR_BUSY_TITLE_FORMAT='#{?#{m:✳*,#{pane_title}},#{?#{==:#{@ccar_any_busy},ask},#{@ccar_ask},#{?#{==:#{@ccar_any_busy},1},#{@ccar_spin},#{?#{==:#{@ccar_any_busy},sub},#{@ccar_sub_spin},#{?#{==:#{@ccar_any_busy},grok},#{@ccar_grok_job},#{?#{==:#{@ccar_any_busy},limit},#{@ccar_wait},✳}}}}}#{s|^✳||:#{pane_title}},#{pane_title}}'
 # Frames for that spinner, cycled in order — Claude's own set, so the window list
 # animates the way the session itself does. Whitespace-separated; a single glyph
 # gives a static indicator.
@@ -139,6 +140,13 @@ CCAR_LIMIT_GLYPH='⧗'
 # A single codepoint (U+2757, wcwidth 2) for the same reason as CCAR_GROK_IDLE_GLYPH:
 # ⚠️ is U+26A0 + VS16, which wraps the status line on Windows Terminal.
 CCAR_ASK_GLYPH='❗'
+# A Claude pane whose grok MCP server has a job running, after the turn that started
+# it has ended (Claude Code backgrounds a long grok call). Static, so a grok-only
+# stretch never starts the frame loop. CCAR_GROK_MCP_CMDLINE is the tail of the
+# server's command line, which is how its process is found under the pane; empty
+# disables the state.
+CCAR_GROK_JOB_GLYPH='✻'
+CCAR_GROK_MCP_CMDLINE='grok_mcp.py'
 # Milliseconds per frame. Each frame costs ONE tmux call per server that has a
 # working pane (set-option + refresh-client, batched), so this is the knob to
 # raise if the animation ever shows up in CPU. 0 disables the animation and pins

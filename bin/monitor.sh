@@ -273,6 +273,7 @@ install_busy_format() {
       set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
       set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
       set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-🚹}" \; \
+      set-option -g @ccar_grok_job "${CCAR_GROK_JOB_GLYPH:-✻}" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" \; \
       set-option -g @ccar_ask "${CCAR_ASK_GLYPH:-❗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
@@ -384,9 +385,11 @@ read_hook_sub() { # $1 = paneref
 #                                    without that evidence does NOT count, so an
 #                                    idle pane swept into an account-usage latch
 #                                    keeps its own glyph)
+#   $7 grok     = "0" | "1"        (pane_has_grok_job: the pane's grok MCP server
+#                                    has a job running)
 # Echoes the pane's state: "ask" (a dialog is waiting on the user), "limit"
 # (parked until the window resets), "1" (the main agent is running a turn), "sub" (the main agent is idle, its subagents are
-# not) or "0" (idle).
+# not), "grok" (the turn is over, a grok job it started is not) or "0" (idle).
 #
 # The signals disagree in every direction, and each is authoritative somewhere:
 #
@@ -415,13 +418,18 @@ read_hook_sub() { # $1 = paneref
 #   agent's. Only the count separates "thinking" from "waiting on its agents",
 #   and only a hook-set turn of its own takes the window back.
 #
-#   scrape=1 has the last word, and it is what carries a pane with no hooks at
+#   grok is process liveness, so neither the stale clear nor a frozen screen
+#   disproves it: Claude Code backgrounds a long grok call and ends the turn, which
+#   fires Stop while the job runs on, and nothing fires when the job finishes.
+#   Every other working signal outranks it.
+#
+#   scrape=1 outranks grok, and it is what carries a pane with no hooks at
 #   all: Claude Code fires none when a background-task notification (a finished
 #   subagent, a scheduled wake) resumes a session, so the hook can read 0 from
 #   the last Stop while a turn is genuinely running. Seeing the spinner is proof
 #   that something is.
 decide_busy() {
-  local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" stale=0
+  local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" grok="${7:-0}" stale=0
   # A parked pane keeps the hourglass only while it still looks parked. A live
   # spinner means it was resumed and will not get a continue at reset (should_resume
   # sees it repainting and skips it), so live activity takes the window back. Only
@@ -438,12 +446,52 @@ decide_busy() {
   [ "$stale" = 0 ] && [ "$hook" = 1 ] && { printf '1'; return; }
   [ "$stale" = 0 ] && [ "$sub" = 1 ] && { printf 'sub'; return; }
   [ "$scrape" = 1 ] && { printf '1'; return; }
+  [ "$grok" = 1 ] && { printf 'grok'; return; }
   printf '0'
+}
+
+proc_children() { # $1 = pid, $2 = varname to set. Every thread's children: a job is spawned from a worker thread
+  local _f _line _acc=""
+  for _f in "${CCAR_PROC_ROOT:-/proc}/$1"/task/*/children; do
+    [ -r "$_f" ] || continue
+    _line=""
+    read -r _line <"$_f" || true
+    _acc+=" $_line"
+  done
+  printf -v "$2" '%s' "$_acc"
+}
+
+is_grok_mcp_server() { # $1 = pid
+  local arg
+  local -a argv=()
+  mapfile -d '' -t argv <"${CCAR_PROC_ROOT:-/proc}/$1/cmdline" 2>/dev/null || return 1
+  for arg in "${argv[@]}"; do
+    [[ "$arg" == *"$CCAR_GROK_MCP_CMDLINE" ]] && return 0
+  done
+  return 1
+}
+
+# True while the pane's claude has a grok MCP server with a live job. The server
+# spawns one child per job and nothing else for longer than an instant, so "has a
+# child" is "is working". $1 = the pane's process id; $2 is the recursion depth.
+pane_has_grok_job() {
+  [ -n "${CCAR_GROK_MCP_CMDLINE:-}" ] && [ -n "${1:-}" ] || return 1
+  local kids grandkids kid
+  proc_children "$1" kids
+  for kid in $kids; do
+    if is_grok_mcp_server "$kid"; then
+      proc_children "$kid" grandkids
+      [ -n "${grandkids// }" ] && return 0
+    elif [ "${2:-0}" -lt 2 ]; then
+      pane_has_grok_job "$kid" $(( ${2:-0} + 1 )) && return 0
+    fi
+  done
+  return 1
 }
 
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local pr="$1" hook sub limited=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title
+  local pr="$1" hook sub limited=0 grok=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title pane_pid
   hook="$(read_hook_busy "$pr")"
   sub="$(read_hook_sub "$pr")"
   # What this publish folded in. The idle refresh republishes only when a hook
@@ -453,7 +501,9 @@ publish_busy() { # $1 = paneref
   pane_sub_seen[$pr]="$sub"
   [ -n "${pane_parked[$pr]:-}" ] && limited=1
   socket_attached "$(pr_socket "$pr")" && att=1
-  cmd="$(txp "$pr" display-message -p -t "$(pr_pane "$pr")" '#{pane_current_command}' 2>/dev/null)"
+  cmd="$(txp "$pr" display-message -p -t "$(pr_pane "$pr")" '#{pane_current_command} #{pane_pid}' 2>/dev/null)"
+  pane_pid="${cmd##* }"
+  cmd="${cmd% *}"
   if [ "$cmd" = grok ]; then
     # Title is cheap (one display-message) and is grok's actual working signal,
     # so we read it even with no client attached — unlike the Claude colour
@@ -488,7 +538,8 @@ publish_busy() { # $1 = paneref
     # flag still up falls through both: its timer is unobserved, not disproven.
     unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
   fi
-  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age" "$sub" "$limited")"
+  [ "$cmd" != grok ] && pane_has_grok_job "$pane_pid" && grok=1
+  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age" "$sub" "$limited" "$grok")"
   if [ "$busy" = 0 ] && { [ "$hook" = 1 ] || [ "$sub" = 1 ]; } && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
     log "pane $pr: hook flag stranded (no Stop/SubagentStop?) — cleared @ccar_busy after ${veto_age}s frozen with no spinner"
     pane_hook_veto_logged[$pr]=1
@@ -531,16 +582,16 @@ stats_emit() { # $1 = force — close the window even when it is shorter than CC
   # Two closes in the same second have nothing to report and would divide by zero.
   [ "$wall" -gt 0 ] || return 0
   local t; t=$(cpu_ticks)
-  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 sub=0 att=0 k
+  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 sub=0 grok=0 att=0 k
   pct10=$(( dcpu * 10 / wall ))          # ticks are 10ms, so ticks/second IS percent-of-core
   for k in "${!pane_busy[@]}"; do
-    case "${pane_busy[$k]}" in 1) busy=$(( busy + 1 )) ;; sub) sub=$(( sub + 1 )) ;; esac
+    case "${pane_busy[$k]}" in 1) busy=$(( busy + 1 )) ;; sub) sub=$(( sub + 1 )) ;; grok) grok=$(( grok + 1 )) ;; esac
   done
   for k in "${!attached[@]}";  do [ "${attached[$k]}" = yes ] && att=$(( att + 1 )); done
-  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"sub":%d,"servers_attached":%d,"latched":%d}\n' \
+  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"sub":%d,"grok":%d,"servers_attached":%d,"latched":%d}\n' \
     "$(date -Is)" "$wall" "$(( dcpu * 10 ))" "$(( pct10 / 10 ))" "$(( pct10 % 10 ))" \
     "$stats_polls" "$stats_frames" "$(count "$poll_registry")" "$(count "$poll_panes")" \
-    "$busy" "$sub" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
+    "$busy" "$sub" "$grok" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
   stats_last_ts=$now; stats_last_cpu=$t; stats_polls=0; stats_frames=0
   local max="${CCAR_STATS_MAX_BYTES:-262144}"
   if [ "$(stat -c%s "$CCAR_STATS_JSONL" 2>/dev/null || echo 0)" -gt "$max" ]; then
@@ -584,7 +635,7 @@ publish_any_busy() {
   [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ] || return 0
   local p s state
   local -A any=()
-  local -A rank=([0]=0 [limit]=1 [sub]=2 [1]=3 [ask]=4)
+  local -A rank=([0]=0 [limit]=1 [grok]=2 [sub]=3 [1]=4 [ask]=5)
   for p in "${!pane_busy[@]}"; do
     s="$(pr_socket "$p")"; state="${pane_busy[$p]}"
     [ -n "${any[$s]:-}" ] && [ "${rank[${any[$s]}]:-0}" -ge "${rank[$state]:-0}" ] && continue

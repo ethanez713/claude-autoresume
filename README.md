@@ -239,6 +239,7 @@ spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
 2:✳ rotblock            <- Claude, idle at the prompt
 3:◑ notes               <- Claude idle; its subagents are still working
 4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
+4:✻ grokjobs            <- Claude idle; a grok job it started is still running
 5:⠏ chinese             <- Grok, running a turn (its own braille spinner)
 6:🚹 windows_or_ac      <- Grok, idle
 ```
@@ -272,6 +273,12 @@ puts the `1` back; the subagent pair keeps a count
 beside it, under an `flock` because a fan-out starts several in the same instant.
 The monitor reads both via `read_hook_busy()` and `read_hook_sub()`. Every event
 also touches `.activity` in that directory, which is what wakes a quiet monitor.
+
+A grok job outlives the turn that started it, because Claude Code backgrounds a
+long MCP call and ends the turn. The monitor finds it by process, not by hook: the
+pane's grok MCP server (`CCAR_GROK_MCP_CMDLINE`) has a child exactly while a job
+runs (`pane_has_grok_job`). The glyph is static, so a grok-only stretch costs
+the normal scan and no animation.
 
 Neither signal is trusted alone, because each is wrong in one direction. The
 scrape false-negatives constantly: while a tool call runs, the pane paints the
