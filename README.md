@@ -1,475 +1,179 @@
 # claude-autoresume
 
-Auto-wait + auto-resume for an interactive Claude Code session that hits the
-5-hour rate limit — **100% local**, no third-party code, only `claude` itself
-talks to Anthropic.
+A local `claude` wrapper that resumes rate-limited Claude Code sessions in place.
 
-When the account limit pauses your sessions, a single tmux-side monitor reads
-your status line's **`used_percentage` + `resets_at` signal**, shows a countdown,
-and sends `continue the above workflow` + Enter into **every** paused window when
-the window resets. No relaunch, same conversations/context.
+## The problem
 
-## How it works (one paragraph)
+Claude Code stops a session when the account hits its 5-hour usage limit. The conversation stays open and sits idle until someone comes back and types. This wrapper keeps those sessions in tmux and resumes each one once the limit resets.
 
-`claude` is aliased to `bin/cc-run`. **Inside tmux** it runs Claude in your
-current pane (no new server, no nesting); **outside tmux** it falls back to
-building a private-socket session and attaching. Either way it records the pane
-in a small registry and starts one background monitor. The monitor watches every
-registered pane (across your own tmux server and the fallback alike) and flags
-each pane the moment it shows evidence of hitting the limit — the pause message
-on screen, the rate-limit choice prompt (which it answers), or the
-`used_percentage` signal written to a state file by the patched
-`~/.claude/statusline.py`. It waits until `resets_at`, then un-pauses each
-flagged pane with `tmux send-keys` — but only if the pane still looks paused (a
-frozen screen, unchanged since the pause), so it never types into active work
-and never misses a pane whose message got buried by UI chrome. See
-**[PLAN.md](PLAN.md)** for the full design.
+Only `claude` talks to Anthropic. The wrapper, the monitor, and the status-line patch stay on the machine.
 
-## Status
+## How it works
 
-**Built and in daily use.** Detection and resume are validated end-to-end
-against scratch tmux panes painted with real pause screens: false-positive
-vetoes (limit phrase or quoted choice menu in a conversation), the pause message
-buried under a todo checklist or scrolled off-screen entirely, hand-resumed
-panes skipped, idle panes never injected, sleep/wake, cancel, native
-passthrough, per-dir windows. One item still needs a real limit to finalize —
-see **PLAN.md §9**: confirming `CCAR_RESUME_TEXT` un-pauses claude and whether a
-menu needs `CCAR_RESUME_PREKEYS`.
+`claude` is an alias for [`bin/cc-run`](bin/cc-run). Inside tmux, Claude runs in the current pane. Outside tmux, the launcher uses a private `ccar` socket. Either way the pane is recorded, and one background [`bin/monitor.sh`](bin/monitor.sh) watches every registered pane.
 
-## One-time setup
+```mermaid
+flowchart LR
+  status["status line writes state.json"] --> loop["monitor.sh loop"]
+  hooks["busy hooks"] --> loop
+  loop --> latch["per-pane latch"]
+  latch --> resume["evidence-gated resume after the reset"]
+```
+
+The patched status line writes `used_percentage` and `resets_at` to `state.json` on each render. Busy hooks record turns, subagents, and dialogs. The monitor latches a pane when that account signal says the limit has hit, or when the pause is on the pane's own screen, then waits until `resets_at`. At reset it sends the resume text only when the pane still looks paused: a frozen screen, unchanged since the pause.
+
+Detection, the wait, native passthrough, and the remote-control watchdog are specified in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Install
+
+`tmux` and `python3` need to be on `PATH`. The installer stays on the machine: it checks for both and tells you if either is missing.
 
 ```bash
 ./install.sh
 ```
 
-The installer is idempotent and 100% local (it installs nothing from the network
-and never auto-installs system packages). It: checks for `tmux`/`python3` and
-reports if missing; `chmod +x bin/*`; copies `config.example.sh` → `config.sh` if
-absent (never clobbers); creates `~/.claude/autoresume{,/panes}` at `0700`; applies
-the fail-soft status-line patch to `~/.claude/statusline.py` (keeps a `.bak`, skips
-if already applied, falls back to printing manual steps if it can't find the parse
-anchor); and adds the `claude` alias to `~/.bashrc` (skipped if already present, or
-with `CCAR_NO_ALIAS=1`). Override `CLAUDE_DIR`/`BASHRC` to install elsewhere. Then
-open a new shell (or `source ~/.bashrc`).
+Safe to re-run. It:
+
+- marks `bin/*` executable
+- copies [`config.example.sh`](config.example.sh) to `config.sh` when that file is absent
+- creates `~/.claude/autoresume` (and `panes/`) at mode `0700`
+- patches `~/.claude/statusline.py` so the monitor can read the usage signal
+- writes the busy hooks into `~/.claude/settings.json`
+- aliases `claude` to `bin/cc-run` in `~/.bashrc`
+- links `cc-attach` and `cc-cancel` into `~/.local/bin` when that directory is on `PATH`
+
+If a patch can't be applied, it prints the manual step and keeps going.
+
+`CCAR_NO_ALIAS=1` skips the alias. `CLAUDE_DIR` and `BASHRC` retarget the Claude directory and the shell rc. Open a new shell, or `source ~/.bashrc`, before the alias is visible.
 
 ## Usage
 
-Run the launcher directly, or alias `claude` to it so your normal interface is
-always wrapped:
-
 ```bash
-# ~/.bashrc — interactive shells only; scripts/non-interactive `claude` unaffected
-alias claude="$HOME/claude-autoresume/bin/cc-run"
+claude                  # inside tmux: this pane. outside: the fallback session
+claude "fix the bug"    # arguments go to the real claude
+claude -c               # continue this directory's last conversation
+claude --resume         # Claude Code's session picker
+cc-attach               # reattach, or reopen tabs after the server is gone
+cc-attach -y            # reopen every saved tab without asking
+cc-cancel               # stop the monitor's pending resume
 ```
 
-```bash
-claude                # inside tmux: runs in THIS pane (fresh convo, like native)
-                      # outside: shows the running session and asks before joining
-claude "fix the bug"  # args forwarded to the real claude
-claude -c             # continue this dir's last conversation
-claude --resume       # claude's session picker
-# ...work normally; walk away. On a limit it waits + auto-resumes in place.
-# <prefix> then X     # stop retrying (cancel)   — <prefix> is YOUR tmux prefix
-#   ...or run `cc-cancel` from any shell to do the same.
-cc-attach             # get back to the fallback session (see below)
-```
+Inside tmux, your prefix then `X` is the same cancel (`CCAR_CANCEL_KEY`). Prefix then `d` detaches the fallback session; a later `claude` or `cc-attach` walks back in. Use those commands to attach. They set `TERM` the way the launcher does, so Claude's TUI renders. A hand-rolled `tmux -L ccar attach` uses the shell's `TERM` and garbles the screen.
 
-Inside tmux, Claude takes over the current pane and your shell prompt returns when
-it exits — so open a tmux window/tab per project and run `claude` in each. (When
-launched from a plain, non-tmux shell, it instead builds the private `ccar`
-fallback server and attaches; `<prefix> then d` detaches it, and `claude` or
-`cc-attach` walks back in — see below.)
+Non-interactive `claude` is the real CLI: `-p` / `--print`, subcommands (`mcp`, `doctor`, `update`, `auth`, …), `--version`, `--help`, and any piped stdin. The launcher `exec`s `claude`, which bypasses the alias.
 
-### Behaves like native `claude`
-
-The alias is a transparent stand-in for the real CLI:
-
-- **Non-interactive invocations pass straight through, no tmux:** `claude -p …`
-  (headless print), every subcommand (`mcp`, `doctor`, `update`, `auth`, …),
-  `--version`/`--help`, and any piped/redirected stdin. Only an interactive
-  session launch gets wrapped.
-- **Runs where you are.** Inside tmux, `claude` runs a fresh conversation in your
-  current pane (native semantics — `claude` always starts fresh; use `-c` to
-  continue this dir's last convo). The fallback path keys each window to its
-  directory via a `@ccar_dir` tmux option and, on a plain launch, rejoins that
-  window when one already exists.
-- **One account-wide monitor** watches every registered pane. Because the rate
-  limit is per-account (all sessions pause together), on reset it resumes *all*
-  paused panes, not just one.
-
-The launch uses `exec claude`, which bypasses the alias (execvp ignores aliases)
-so there's no recursion.
-
-The monitor follows your panes via a **registry** (`~/.claude/autoresume/panes/`),
-so it works on whichever tmux server you're on. Only the **fallback** path (when
-you launch from outside tmux) uses the private `ccar` socket; manage it with:
-
-```bash
-tmux -L ccar ls                       # list the fallback session + windows
-tmux -L ccar kill-session -t cc       # end the fallback session
-```
-
-### Joining a session that is already running
-
-`claude` from a plain shell with a wrapped session already up shows you that
-session before it does anything to it — one row per window, its directory, and
-what the monitor says that pane is doing:
+A plain `claude` from a shell that already has a wrapped session shows that session and asks before joining. `Y` attaches, on this directory's window when one exists. `N` ends that session, running turns included, and starts over with one window for the current directory.
 
 ```
 A wrapped session is already running on socket 'ccar':
 
-  1  /home/you/rotblock          idle   <- you are here
-  2  /home/you/notes             working
-  3  /home/you/spend-visualizer  parked at the rate limit
+  1  /home/you/project-a   idle   <- you are here
+  2  /home/you/project-b   working
+  3  /home/you/project-c   parked at the rate limit
 
   [Y] attach, on this directory's own window
-  [N] end that session — all 3 window(s) above — and start over with just /home/you/rotblock
+  [N] end that session — all 3 window(s) above — and start over with just /home/you/project-a
 
 Attach? [Y/n]
 ```
 
-`Y` (the default) attaches to the session as it is. Standing in a directory the
-session already has a window for, it takes you back to that window. Standing
-anywhere else, it attaches to whichever window was current; a new tab is
-something you open inside tmux and launch `claude` in. An invocation the
-running window can't satisfy — a prompt to deliver, `--resume`, any other
-option — still gets its own window.
+A prompt, `--resume`, or any other option still gets its own window. Read the state column before answering `N`.
 
-`N` ends that whole session, running turns included, and starts over with a
-single window for where you are. It is the only destructive answer in this repo,
-which is why the state column is there: read it before you type.
-
-### Getting back after a reboot
-
-A detach costs you nothing — the server keeps running, and either `claude` or
-`cc-attach` walks straight back in, with the same `TERM` override the launcher
-uses (a hand-rolled `tmux -L ccar attach` renders the TUI with the shell's
-`screen-256color` and garbles it).
-
-A reboot or a `wsl --shutdown` is different: tmux keeps no session state on disk,
-so the windows are gone. The conversations are not — Claude Code files those
-under `~/.claude/projects/`, keyed by directory — and the pane registry outlives
-the server. The monitor drops a row the moment its pane closes, so what the
-registry holds when everything goes down is the set of Claude tabs that were
-open, across **every** tmux server, not just the `ccar` fallback (a conversation
-is keyed by its directory, so the server it used to live in does not matter).
-
-**There is nothing to remember about `claude` vs `cc-attach`.** A bare `claude`
-(or `claude -c`) from a plain shell, when the `ccar` server is gone and there are
-tabs to bring back, offers them in an arrow-key list — the directory you launched
-from included — and reopens the ones you keep:
+After a reboot or `wsl --shutdown`, tmux has no session to restore. The conversations are still under `~/.claude/projects/`, keyed by directory, and the pane registry still names the tabs that were open. A bare `claude` (or `claude -c`) from a plain shell then offers them in an arrow-key list, including the directory you launched from:
 
 ```
-No wrapped session running — reopening the Claude tabs from your last session.
-(Scrollback and any unsent input are not recoverable.)
-
   Reopen which sessions?  ↑↓ move · space toggle · a all · n none · enter go · q cancel
- › [x] /home/you/rotblock
-   [x] /home/you/notes
-   [x] /home/you/chinese
+ › [x] /home/you/project-a
+   [x] /home/you/project-b
+   [x] /home/you/project-c
 ```
 
-Each reopened tab continues its last conversation where one exists and starts
-fresh otherwise. Cancel (`q`) and you fall through to a plain single window.
-`cc-attach` does the same on its own — `-y` reopens everything without asking —
-and stays as the explicit "just reattach, or reopen" entry point.
-
-### Remote-control watchdog (opt-in)
-
-Claude Code's **Remote Control** already recovers from the disconnects you'd
-expect, and this repo does not duplicate any of it — turn on *"Enable Remote
-Control for all sessions"* (`/config`, or `"remoteControlAtStartup": true`) and
-every session connects itself, including panes the monitor resumes; the bridge
-also rebuilds its own transport after a laptop sleep or a network blip.
-
-What none of that covers is the state *after* Claude Code's internal recovery is
-exhausted: the footer badge reads `/rc failed` and its own advice is to run
-`/remote-control` again by hand — which nobody does at 3am. Set `CCAR_RC_ENABLE=1`
-and the monitor re-types that command for you, and nothing else. The badge is the
-only observable surface of the bridge (its state lives in memory, not in any file
-or the status-line JSON), so the watchdog reads it precisely: **only `/rc failed`
-triggers a reconnect.** `/rc active` — or the bare `/rc` it collapses to after a
-few views — means connected; `/rc reconnecting` and `/rc connecting…` mean Claude
-Code is already recovering; and *no badge at all* is the normal look of an
-outbound-only pane (reachable from your phone but with no interactive bridge), a
-disabled one, or one narrower than Claude Code's 60-column cutoff — none of which
-is a failure. It only ever types into a pane it can prove is idle: an input box
-that is present and **empty**, a screen byte-identical two seconds apart (a
-session mid-turn repaints its timer every second), no rate-limit UI, and no rate
-limit latched. Attempts back off per pane (1, 2, 4, 8, 16, 30, 60 minutes, then
-hold), and the bridge leaving the failed state resets that.
-
-```bash
-tests/rc_watchdog_test.sh   # screen-reading helpers, no tmux
-tests/rc_watchdog_e2e.sh    # rc_check driven against scratch tmux panes
-```
-
-Everything under `tests/` runs standalone and needs no account: the `_test.sh`
-files are pure functions, the `_e2e.sh` ones drive scratch tmux servers with a
-stub `claude` on `PATH`.
+Each reopened tab continues its last conversation when one exists, and starts fresh otherwise. `q` falls through to a single new window. `cc-attach` is the same flow, and the entry point when you only want to reattach or reopen. Run it from a plain shell; from inside tmux it stops, because attaching there would nest a server.
 
 ### Rendering
 
-Claude's TUI garbles on scroll inside tmux if the terminal advertises xterm caps,
-so both paths need `default-terminal tmux-256color` + truecolor `terminal-features
-RGB`. **In-tmux:** put these in your own `~/.tmux.conf` (your normal server renders
-Claude). **Fallback:** the `ccar` session loads this repo's `tmux.conf`, which
-sources your `~/.tmux.conf` (you keep your prefix/mouse/keys), applies the same
-caps, and — because a hardcoded `TERM=screen-256color` in the shell rc makes tmux
-render with the wrong terminfo — attaches with `TERM=xterm-256color`
-(`CCAR_OUTER_TERM`). Scroll with tmux copy-mode (`<prefix>` then `[`).
+Claude's TUI needs `default-terminal tmux-256color` and truecolor (`terminal-features ",*:RGB"`). On your own server, put that in `~/.tmux.conf`. The fallback server loads this repo's [`tmux.conf`](tmux.conf), which sources yours, applies the same caps, and forwards Claude's terminal title to the outer tab. Scroll with tmux copy-mode (prefix then `[`). If Windows Terminal keeps a stale title, the profile's "Suppress title changes" setting is what blocks it.
 
-The config also forwards Claude's terminal title (status emoji + session summary)
-to the outer terminal tab via `set-titles on` / `set-titles-string '#T'` — tmux
-otherwise swallows the app's OSC title into the pane title. The monitor rewrites
-that title too, so the tab and the taskbar sparkle while any session works (see
-below). (If Windows Terminal doesn't update, check the profile's "Suppress title
-changes" isn't enabled.)
+### Working glyph
 
-### Working-vs-idle glyph
-
-Claude Code emits the same title glyph (`✳`) whether a session is parked at the
-prompt or burning tokens, so a window list of several sessions can't tell you
-which ones are actually running. The monitor closes that gap and gives each pane
-the glyph of the state it is actually in — a working one gets Claude's own
-spinner, ping-ponging `· * ✢ ✶ ✽ ✻` and back:
+Claude's title glyph stays `✳` for a running turn and for an idle prompt. The monitor swaps a leading `✳` on the window name for the state it has published:
 
 ```
-1:✽ adbconnect          <- Claude, running a turn
-2:✳ rotblock            <- Claude, idle at the prompt
-3:◑ notes               <- Claude idle; its subagents are still working
-4:⧗ pyfin               <- parked at the limit, waiting for the window to reset
-4:✻ grokjobs            <- Claude idle; a grok job it started is still running
-5:⠏ chinese             <- Grok, running a turn (its own braille spinner)
-6:🚹 windows_or_ac      <- Grok, idle
+1:✽ project-a    Claude, running a turn
+2:✳ project-b    Claude, idle at the prompt
+3:◑ project-c    Claude idle; its subagents are still working
+4:⧗ project-d    parked at the limit, waiting for the window to reset
+5:✻ project-e    Claude idle; a grok job it started is still running
+6:⠏ project-f    Grok, running a turn
+7:🚹 project-g    Grok, idle
 ```
 
-**Give a Claude or Grok pane's window name a leading `✳`** — that anchor is
-what the monitor swaps for the state glyph, and naming windows is your tmux's
-job, not this repo's. In your `~/.tmux.conf`:
+Put that leading `✳` on Claude and Grok window names in `~/.tmux.conf`. Naming windows is tmux's job:
 
 ```tmux
 set -g automatic-rename on
 set -g automatic-rename-format '#{?#{||:#{==:#{pane_current_command},claude},#{==:#{pane_current_command},grok}},✳ ,}#{b:pane_current_path}'
 ```
 
-Emit the anchor here rather than lifting it off the terminal title: Claude Code
-does put a `✳` in front of its title, but not on every pane in every state, and a
-window whose name is missing the anchor gets no glyph at all.
+A window without the anchor — a shell, an editor — is left as it is. The same swap is applied to the terminal title, so the tab and the taskbar follow the busiest watched pane on that tmux server.
 
-**The signal is hook-driven, not scraped.** `./install.sh` writes the hooks
-into `~/.claude/settings.json`, each pointing at `bin/cc-busy-hook <event>`:
-`UserPromptSubmit` (a turn started), `Stop` and `StopFailure` (it ended, the
-latter on an API error), `SubagentStart` /
-`SubagentStop` (a subagent came or went), `SessionStart` (clears flags stranded
-by a previous session in this pane, and tells the monitor hooks are live here),
-and `SessionEnd` (drops the pane's state entirely). A turn start writes `1`
-and both stops write `0` to a per-pane file in `CCAR_BUSY_DIR`;
-`PermissionRequest` and a `PreToolUse` scoped to `AskUserQuestion|ExitPlanMode`
-write `ask` there while a
-dialog waits on you (the window shows `CCAR_ASK_GLYPH`, and the stale-clear below
-never applies to it), and the first `PostToolUse`/`PostToolUseFailure` after it
-puts the `1` back; the subagent pair keeps a count
-beside it, under an `flock` because a fan-out starts several in the same instant.
-The monitor reads both via `read_hook_busy()` and `read_hook_sub()`. Every event
-also touches `.activity` in that directory, which is what wakes a quiet monitor.
+Latch and resume apply to Claude panes. Grok panes on a server that already has a registered Claude pane get glyphs only. The Grok MCP server is published at [claude-code-toolkit](https://github.com/ethanez713/claude-code-toolkit).
 
-A grok job outlives the turn that started it, because Claude Code backgrounds a
-long MCP call and ends the turn. The monitor finds it by process, not by hook: the
-pane's grok MCP server (`CCAR_GROK_MCP_CMDLINE`) has a child exactly while a job
-runs (`pane_has_grok_job`). The glyph is static, so a grok-only stretch costs
-the normal scan and no animation.
+### Remote control
 
-Neither signal is trusted alone, because each is wrong in one direction. The
-scrape false-negatives constantly: while a tool call runs, the pane paints the
-tool's output where the spinner line would be, so "no spinner" is not evidence
-of idleness. The hook false-negatives too: no hook fires when a background-task
-notification (a finished subagent, a scheduled wake) resumes a session, so it
-can still read `0` from the last `Stop` on a turn that is genuinely running.
+Claude Code's own Remote Control reconnects across sleep and network blips when *"Enable Remote Control for all sessions"* is on. What remains is a footer that reads `/rc failed` after that recovery is exhausted. Set `CCAR_RC_ENABLE=1` and the monitor re-types `/remote-control` into a pane it can show is idle. The rules are in [docs/DESIGN.md](docs/DESIGN.md) §8a.
 
-So a visible spinner always wins, whatever the hook says; and a hook-set `1` is
-cleared only once the pane has held **byte-identical AND spinnerless** for
-`CCAR_BUSY_STALE_SECONDS` (20s) — the state an Esc-interrupt or a `kill -9`
-leaves behind, since a live turn repaints and a parked one does not. That is the
-same frozen-means-parked test `should_resume()` uses on the rate-limit path.
+### Operating the monitor
 
-**Grok panes share the slot, not the glyphs.** Grok prefixes `#{pane_title}`
-with a braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) while a turn runs and drops it when
-idle, so the monitor reads the title (`CCAR_GROK_BUSY_TITLE_REGEX`) instead of
-Claude's colour regex. The window list then uses the 4-pip frames of that
-spinner (`⠹⠼⠧⠏`) while Grok is working and `🚹` when it is idle, so the two
-tools cannot be mistaken for each other. Grok windows on a tmux server that
-already has a registered
-Claude pane are picked up automatically; they are not latched or auto-resumed.
-
-**Detection keys on colour, not on the glyph or the wording.** A finished turn
-leaves a spinner-*shaped* line on screen — `✻ Cooked for 24m 49s` — so matching
-the glyph reads every parked session as working. What separates them is that
-Claude paints the glyph in an active colour while the turn runs and in grey once
-it ends. The verb pulses through several shades but the glyph's colour is
-stable, so the glyph is what `CCAR_BUSY_REGEX` matches, against a
-`capture-pane -pe`. The wording is no help: it's randomised per turn
-("Processing…", "Beboppin'…", "Doodling…") and one genuinely active state,
-`✻ Waiting for 1 background agent to finish`, is shaped exactly like the
-completion line. Re-derive the colour for another theme with:
-
-```
-tmux capture-pane -pe -t <pane> | grep -aE $'^\033\[' | cat -v
-```
-
-### Waiting, and working through someone else
-
-Two more states share the same slot, because "not running a turn" is not the
-same as "nothing is happening":
-
-* **Subagents are still working** while the main agent is idle — the session
-  finished its turn and handed the job to agents that are still out. `Stop` has
-  fired, so every busy signal reads idle; only the hook's subagent count knows
-  otherwise. The pane's own subagent panel is no help: it paints a coloured
-  spinner the scrape cannot tell apart from a turn of the main agent's own,
-  which is exactly why the count decides it. Rendered as a phase cycle
-  (`CCAR_SUBAGENT_GLYPHS`, `○ ◑ ● ◐`) rather than a star one, so delegated work
-  reads as a different kind of activity and not just another busy session.
-* **Parked at the rate limit**, waiting for the window to reset — the pane the
-  monitor is about to resume. It is a latch, not a reading, so it outranks every
-  other signal: a turn cut off mid-flight never fires `Stop`, and its stranded
-  flag must not read as work. Static `⧗` (`CCAR_LIMIT_GLYPH`), because nothing
-  is happening and that is the whole message.
-
-The result is published as the window option `@ccar_busy` — `1`, `sub`, `limit`
-or `0` — and the monitor patches `window-status-format` to swap a *leading* `✳`
-for that state's glyph. The swap only fires on that anchor, so a window without
-one — a shell, an editor, anything that isn't a Claude pane — is left exactly as
-it is rather than having a glyph prepended to it.
-
-### The same glyph in the taskbar
-
-The window list only helps when you are looking at it. The terminal's own title —
-the tab, and the taskbar entry behind every other window — is all you can see of a
-session you walked away from, so the monitor splices `CCAR_BUSY_TITLE_FORMAT` into
-`set-titles-string` as well (turning `set-titles` on if it was off, since a title
-nobody pushes to the terminal can't sparkle).
-
-That title belongs to whichever pane is active, so it can't read the per-window
-`@ccar_busy`. It reads `@ccar_any_busy`, which the monitor sets per tmux *server*
-to the busiest state among its watched panes. Precedence there is deliberately
-not the per-window one — the taskbar answers "is anything still moving", so a
-running turn outranks working subagents, which outrank a parked pane. You get the
-spinner while anything anywhere is running, whatever window you left in front;
-the hourglass once the only thing left is a wait; and a still `✳` when nothing is
-happening at all.
-
-The swap fires on the leading `✳` of the *pane* title (`#T`), the one Claude
-itself sets. A pane that isn't Claude has no `✳` to swap and stays as it is.
-
-Frames advance during the monitor's poll sleep: one batched `set-option ;
-refresh-client -S` per *server* per frame — both cycles in the same call — not
-per working pane. When nothing is
-working it falls back to a plain sleep, so an all-idle box is exactly as quiet as
-it was before. Raise `CCAR_BUSY_ANIM_MS` (default 400) to slow it down; set it to
-`0`, or list a single glyph in `CCAR_BUSY_GLYPHS`, for a static indicator.
-
-The format is patched on whichever tmux server your panes live on (yours as
-often as the `ccar` fallback), which is why it isn't shipped in this repo's
-`tmux.conf`. Only the token already in your format is rewritten — `#W` /
-`#{window_name}` in the window list, `#T` / `#{pane_title}` in the title — so any
-customisation survives; a format naming neither logs a line and is left alone.
-The pre-patch value is stashed in `@ccar_orig_<option>`, so changing
-`CCAR_BUSY_NAME_FORMAT` or `CCAR_BUSY_TITLE_FORMAT` and restarting the monitor
-re-derives from the original rather than patching a patch. The patch is gated on
-a per-server signature (`@ccar_fmt_sig`) of the current glyph config, not an
-in-memory flag: it lives and dies with the tmux server, so a `ccar` session
-rebuilt under a still-running monitor is re-patched on the next poll rather than
-coming up glyph-less.
-
-Set `CCAR_BUSY_TITLE_FORMAT=""` to leave the terminal title alone, or
-`CCAR_BUSY_REGEX=""` to switch the whole thing off.
+Bash reads `monitor.sh` once, at start. After you edit it, stop the pid in `~/.claude/autoresume/monitor.pid` and run `claude` again (or end the session and start it again).
 
 ```bash
-tests/busy_hook_test.sh     # hook parsing + decide_busy, pure functions
-tests/busy_glyph_test.sh    # glyph-frame maths and the idle poll (tmux stubbed)
-tests/busy_format_test.sh   # format splicing + rendering, scratch tmux
-tests/busy_glyph_e2e.sh     # a real monitor.sh drives the tab, incl. re-patch after a rebuild
+tmux -L ccar ls                              # fallback session and windows
+tail -f ~/.claude/autoresume/monitor.log     # monitor log
+tmux -L ccar kill-session -t cc              # end the fallback session
 ```
 
-### Cost
+`~/.claude/autoresume/stats.jsonl` is a heartbeat the monitor appends: its CPU over the window, and how many panes were registered, running, and busy. Inspect it with `tail` or `jq`. `CCAR_STATS_SECONDS=0` turns it off.
 
-Share of one core, one bash loop, no daemon, no network. The quiet row is the
-shape of the loop (blocked in `read`, nothing spawned). The other two are
-measured on this box:
+## Configuration
 
-| state | cost |
+`./install.sh` copies [`config.example.sh`](config.example.sh) to `config.sh` once and leaves an existing `config.sh` alone. `config.sh` is gitignored; edit that copy. Every tunable is commented there: the fallback socket, resume text, limit threshold, glyph formats, deep-idle timing, clock reconciliation, the cancel key, and the remote-control watchdog (off unless `CCAR_RC_ENABLE=1`).
+
+## Tests
+
+The tests stay on the machine. Where a test has to launch Claude, it puts a stub `claude` on `PATH`. Nothing calls Anthropic.
+
+```bash
+tests/run.sh          # unit-style; no tmux server
+tests/run.sh --e2e    # also the tests that drive a throwaway tmux server
+```
+
+`tests/run.sh` exits non-zero if any script it runs fails. The default set is what CI runs. GitHub-hosted Ubuntu images ship shellcheck and do not ship tmux, so anything that starts a tmux server is behind `--e2e`.
+
+Unit-style, run by default:
+
+| script | covers |
 |---|---|
-| quiet | **~0** |
-| idle, but a hook fired recently | ~1.1% |
-| a session working (animating) | ~4.3% |
+| `tests/attach_plan_test.sh` | what `cc-attach` will reopen, and its guards |
+| `tests/busy_glyph_test.sh` | working-vs-idle colour and title checks; tmux stubbed |
+| `tests/busy_hook_test.sh` | hook files and `decide_busy` |
+| `tests/deep_idle_test.sh` | the quiet wait |
+| `tests/launch_join_test.sh` | which launches rejoin an open window |
+| `tests/rc_watchdog_test.sh` | remote-control screen reading |
+| `tests/tui_test.sh` | the arrow-key pick-list |
 
-Quiet is the steady state of a session you walked away from: every watched
-pane's published state is idle (no turn, subagents, dialog, or rate-limit
-park), nothing is latched, no remote-control failure is being tracked, and no
-hook has fired for `CCAR_DEEP_IDLE_AFTER_SECONDS` (5 min). The monitor then
-stops scanning. It sleeps in `CCAR_BUSY_REFRESH_MS` (2s) chunks on a builtin
-`read` timeout — no `sleep`, no `date`, no tmux — until any hook touches
-`$CCAR_BUSY_DIR/.activity` (a `PostToolUse` that writes no state, a `SessionEnd`,
-an event the hook does not recognise), the wall clock jumps because the laptop
-resumed from sleep (that forces a clock reconcile), or
-`CCAR_DEEP_IDLE_SCAN_SECONDS` (1 hour) has passed since the last scan. The wake
-runs one full scan, and the remote-control check ignores its 30s gate for that
-pass. `SessionEnd` touches the stamp, which is what wakes a quiet monitor so
-the no-pane exit can see the pane is gone.
+These need `tmux` and run only with `--e2e`:
 
-Until that quiet threshold, and whenever a pane is animating, asking, limited,
-or an rc failure is open, the monitor keeps the poll. **Nothing paints when no
-client is attached:** the colour capture and the animation are both skipped for
-a server nobody is looking at. **The scan interval is decoupled from the
-indicator:** `CCAR_POLL_SECONDS` (15s) governs limit detection and the full pane
-capture, which needn't be quick — the resume fires at the reset time read from
-`state.json`, not at poll granularity. Between scans, while nothing is
-animating, the monitor sleeps in `CCAR_BUSY_REFRESH_MS` (2s) chunks and reads
-only hook files. It calls tmux for a pane only when that hook state changed (a
-turn, a dialog, or subagents); an unchanged idle pane costs no tmux at all. A
-hook-less turn — a background-task notification resumes a session without
-firing any hook — waits for the next scan: up to one poll while the monitor is
-still polling, or up to the hourly backstop once it is quiet. While a pane is
-animating, that same 2s tick is a capture per attached pane again, so a frozen
-spinnerless screen can still clear a stranded hook flag. **One registry walk
-serves the whole poll:** asking "which panes are alive and running claude"
-costs two tmux round-trips per pane, and the scan, the rc check, and the
-idle-exit check share it.
+| script | covers |
+|---|---|
+| `tests/busy_format_test.sh` | glyph formats rendered on a throwaway tmux server |
+| `tests/reconstruct_test.sh` | the liveness filter for reopen |
+| `tests/attach_rebuild_e2e.sh` | `cc-attach` rebuilding a dead fallback session |
+| `tests/busy_glyph_e2e.sh` | a real `monitor.sh` driving the window list |
+| `tests/launch_join_e2e.sh` | `claude` from a plain shell when a session is already up |
+| `tests/launch_reconstruct_e2e.sh` | `claude` offering tabs after the server is gone |
+| `tests/rc_watchdog_e2e.sh` | the watchdog typing into a scratch pane |
 
-A stats row is written on the way into the quiet sleep and on the way back out,
-so that stretch is its own near-zero sample.
+## License
 
-To trim further: raise `CCAR_DEEP_IDLE_SCAN_SECONDS` (what a quiet box still
-pays for), raise `CCAR_POLL_SECONDS` for the window before quiet, raise
-`CCAR_BUSY_ANIM_MS` (or `0` for a static glyph) while a session is working, or
-set `CCAR_BUSY_REGEX=""` to drop the indicator.
-
-### Resource heartbeat
-
-Every `CCAR_STATS_SECONDS` (300), and again when the monitor enters or leaves
-its quiet sleep, it appends one JSON line to `stats.jsonl` in the state dir —
-its CPU over the window, including every child it reaped, alongside the shape
-it was running against:
-
-```json
-{"ts":"…","window_s":15,"cpu_ms":650,"cpu_pct":4.3,"polls":1,"frames":37,
- "registered":8,"claude":7,"busy":3,"sub":1,"servers_attached":1,"latched":0}
-```
-
-It's a log, not a dashboard: nothing reads it automatically. The shape fields are
-what make a surprising `cpu_pct` actionable rather than merely alarming — a climb
-with `registered` climbing is a pane-registry leak, a climb at constant shape is
-the monitor itself. Trimmed to half of `CCAR_STATS_MAX_BYTES` when it exceeds it;
-`CCAR_STATS_SECONDS=0` turns it off.
-
-```sh
-tail -5 ~/.claude/autoresume/stats.jsonl | jq -c '{ts,cpu_pct,claude,busy}'
-```
-
-## Security
-
-No network calls outside `claude`→Anthropic. No deps beyond bash + tmux + python
-stdlib. send-keys is guarded by a foreground check so it can never inject into a
-shell. State files are `0600` in a `0700` dir and gitignored. Full requirements in
-PLAN.md §7.
+[MIT](LICENSE). Copyright (c) 2026 Ethan Zhou.

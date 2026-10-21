@@ -64,7 +64,7 @@ echo "grok titles (live captures: working panes prefix a braille spinner, idle d
 gbusy()  { title_shows_working "$2" && ok "$1" || bad "$1"; }
 gidle()  { title_shows_working "$2" && bad "$1" || ok "$1"; }
 gbusy "thinking"  "⠋ - Thinking - Widget UV yellow cloud-white detail styl… - grok"
-gbusy "tool call" "⠦ - Running: Read \`/home/ezhou/claude-autor… - Grok status indicators for autoresume mo… - grok"
+gbusy "tool call" "⠦ - Running: Read \`$HOME/claude-autor… - Grok status indicators for autoresume mo… - grok"
 gbusy "activity line with no Running:/Thinking" "⠧ - Capture idle vs working Grok pane screen… - Grok status indicators for autoresume mo… - grok"
 gbusy "every braille frame" "⠏ - Thinking - x - grok"
 gidle "idle session summary" "Delete unused screens and outdated spec … - grok"

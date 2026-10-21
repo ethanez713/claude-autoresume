@@ -1,9 +1,4 @@
-# claude-autoresume — design & status
-
-> Status: **built and working.** Used daily as a transparent `claude` alias. One
-> item still needs a real limit to finalize (§9). This file is the as-built
-> reference; the original step-by-step build spec has been folded into the
-> summaries below now that the work is done.
+# claude-autoresume — design
 
 Everything is **100% local**: the only process that touches the network is
 `claude` talking to Anthropic. The monitor and the status-line patch make **zero**
@@ -258,18 +253,6 @@ native.
   gitignored / outside the repo. Log events, not screen contents.
 - **No silent installs.** tmux presence is checked and reported; operator installs.
 
-## 8. Done
-
-Status-line patch · launcher with passthrough + window-per-dir + alias-safe `exec`
-· single account-wide monitor with per-pane latch detection + evidence-gated
-resume (§4), compute_wait + sleep/wake safety, countdown, backoff · cancel chord
-· private-socket rendering fixes + tab-title forwarding · README + `~/.bashrc`
-alias. Validated end-to-end against a scratch tmux server with fake panes:
-checklist-below-the-message resume (the live failure), fresh-usage FP veto (text
-+ quoted choice menu), hand-resume skip, message-only-in-history resume,
-idle-pane non-injection, choice-prompt answer. The real pause message is
-`You've hit your session limit · resets 4am (America/New_York)`.
-
 ## 8a. Remote-control watchdog (opt-in, `CCAR_RC_ENABLE`)
 
 **Deliberately scoped to what Claude Code does NOT do for itself.** Two of its
@@ -325,26 +308,3 @@ Tests: `tests/rc_watchdog_test.sh` (helpers, no tmux) and
 `tests/rc_watchdog_e2e.sh` (drives `rc_check` against scratch tmux panes painted
 with failed / connected / reconnecting / repainting footers; asserts only the
 failed idle pane is typed into).
-
-## 9. Open
-
-- **Confirm the resume keystrokes at a real limit.** Detection and multi-session
-  resume are solid and tested; what a real limit still needs to verify is that
-  `CCAR_RESUME_TEXT` ("continue the above workflow") actually un-pauses claude,
-  whether a menu requires `CCAR_RESUME_PREKEYS`, and that `CCAR_RESUME_CLEAR`
-  (`C-u`) empties the input on the current build. Capture ground truth when it trips:
-  ```bash
-  tmux -L ccar capture-pane -p -t cc -S -80 > state/limit_screen.txt
-  cat ~/.claude/autoresume/state.json   # used_percentage should read ~100, resets_at sane
-  ```
-- **Optional hardening:** `cc-run`'s monitor-already-running check trusts the
-  pidfile via `kill -0`; a recycled PID could mask a dead monitor. Low value on a
-  personal box — pending a decision.
-
-## 10. Operations
-
-- **Restart the monitor after editing `monitor.sh`** — a running bash loop doesn't
-  re-read its file. Kill the pid in `~/.claude/autoresume/monitor.pid` and relaunch
-  (or end the session and `claude` again).
-- Inspect: `tmux -L ccar ls`, `tail -f ~/.claude/autoresume/monitor.log`.
-- End everything: `tmux -L ccar kill-session -t cc`.

@@ -28,10 +28,10 @@ tm()   { tmux -S "$sock" "$@"; }
 opt()  { tm show-options -gv "$1"; }
 render() { tm display-message -p -t "$2" "$1"; }   # $1 = format, $2 = pane
 
-tm -f /dev/null new-session -d -s t -n '✳ adbconnect' -x 80 -y 24 'sleep 300'
+tm -f /dev/null new-session -d -s t -n '✳ project-a' -x 80 -y 24 'sleep 300'
 pane="$(tm list-panes -t t -F '#{pane_id}' | head -1)"
 printf '%s\t%s\t%s\t%s\n' "$sock" t "$pane" "$tmp" >"$CCAR_PANES_DIR/p1"
-tm select-pane -t "$pane" -T '✳ adbconnect'
+tm select-pane -t "$pane" -T '✳ project-a'
 tm set-option -g window-status-format '#I:#W#F'
 tm set-option -g set-titles-string '#T'
 tm set-option -g set-titles off
@@ -80,42 +80,42 @@ tm set-option -g @ccar_grok_spin '⠏'
 tm set-option -g @ccar_grok_idle "$CCAR_GROK_IDLE_GLYPH"
 tm set-option -g @ccar_grok_job '✻'
 tm set-option -w -t "$pane" @ccar_busy 1
-is "working: the leading ✳ becomes the current frame" '✽ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "working: the leading ✳ becomes the current frame" '✽ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy sub
-is "subagents out: it becomes the subagent frame"     '◑ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "subagents out: it becomes the subagent frame"     '◑ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy grok
-is "turn over, grok job running: it becomes the static job glyph" '✻ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "turn over, grok job running: it becomes the static job glyph" '✻ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy limit
-is "parked at the limit: it becomes the hourglass"    '⧗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "parked at the limit: it becomes the hourglass"    '⧗ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy ask
-is "a dialog awaits the user: it becomes the attention glyph" '❗ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "a dialog awaits the user: it becomes the attention glyph" '❗ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
-is "parked: the name is untouched"                    '✳ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "parked: the name is untouched"                    '✳ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_kind grok
 tm set-option -w -t "$pane" @ccar_busy 1
-is "working grok: the leading ✳ becomes grok's braille frame" '⠏ adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "working grok: the leading ✳ becomes grok's braille frame" '⠏ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy 0
-is "idle grok: mens-symbol emoji, not Claude's ✳"            "$CCAR_GROK_IDLE_GLYPH adbconnect" "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+is "idle grok: mens-symbol emoji, not Claude's ✳"            "$CCAR_GROK_IDLE_GLYPH project-a" "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_kind ''
 tm set-option -w -t "$pane" @ccar_busy 1
-tm rename-window -t "$pane" '🌒 adbconnect'
-is "another glyph (subagent moon) is left alone"      '🌒 adbconnect' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
-tm rename-window -t "$pane" '✳ adbconnect'
+tm rename-window -t "$pane" '🌒 project-a'
+is "another glyph (subagent moon) is left alone"      '🌒 project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm rename-window -t "$pane" '✳ project-a'
 
 echo "terminal title"
 tm set-option -w -t "$pane" @ccar_busy 0    # the title must ignore the per-window flag
 tm set-option -g @ccar_any_busy 1
-is "any session working: the title sparkles"     '✽ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "any session working: the title sparkles"     '✽ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy ask
-is "any session awaiting the user: the taskbar flags it" '❗ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "any session awaiting the user: the taskbar flags it" '❗ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy sub
-is "only subagents left working: the title moons" '◑ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "only subagents left working: the title moons" '◑ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy grok
-is "only a grok job left running: the title shows the job glyph" '✻ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "only a grok job left running: the title shows the job glyph" '✻ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy limit
-is "everything parked at the limit: the taskbar waits" '⧗ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "everything parked at the limit: the taskbar waits" '⧗ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy 0
-is "nothing working: the title keeps its ✳"      '✳ adbconnect' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+is "nothing working: the title keeps its ✳"      '✳ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy 1
 tm select-pane -t "$pane" -T 'user@box: ~'
 is "a title with no ✳ is left alone"             'user@box: ~' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
