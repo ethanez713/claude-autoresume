@@ -17,10 +17,10 @@ idle()  { screen_shows_working "$2" && bad "$1" || ok "$1"; }
 
 nb=$'\xc2\xa0'
 e=$'\033'
-active="$e[38;5;174m"   # the spinner glyph while a turn runs
-verb="$e[38;5;216m"     # verb shade; pulses 174/180/216, which is why we match the GLYPH
-grey="$e[38;5;246m"     # what BOTH the glyph and the text fade to once the turn ends
-off="$e[39m"
+active="${e}[38;5;174m"   # the spinner glyph while a turn runs
+verb="${e}[38;5;216m"     # verb shade; pulses 174/180/216, which is why we match the GLYPH
+grey="${e}[38;5;246m"     # what BOTH the glyph and the text fade to once the turn ends
+off="${e}[39m"
 
 chrome=$'\n──────────────────\n  Opus 5 hi 💡 · Ctx 8% · 🖿 /proj                              /rc\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents'
 prompt=$'❯'"$nb$chrome"

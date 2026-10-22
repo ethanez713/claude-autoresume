@@ -36,8 +36,8 @@ when unused quota is about to reset.
 
 <img src="docs/screenshots/tests.png" width="70%" alt="Tail of the full test run">
 
-**Tests.** 15 suites and 409 assertions, five of them end-to-end against a throwaway tmux
-server. This tail is the remote-control watchdog's run.
+**Tests.** 14 suites and 409 checks, five of them end-to-end against a throwaway tmux
+server. This tail is the end of the remote-control watchdog's end-to-end suite.
 
 ## Install
 

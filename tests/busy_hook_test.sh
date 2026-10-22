@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218 # these call functions from the sourced bin/ scripts; stubs defined further down replace them for later cases
 # Unit tests for the hook-driven @ccar_busy detector: read_hook_busy(),
 # read_hook_sub(), decide_busy(), and bin/cc-busy-hook itself. No tmux, no real
 # claude — the hook is invoked with a fake $TMUX/$TMUX_PANE and the readers and

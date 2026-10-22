@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218 # these call functions from the sourced bin/ scripts; stubs defined further down replace them for later cases
 # Deep idle: the quiet wait forks nothing, and it wakes on a hook stamp, a
 # clock jump, or the hourly backstop. Run: tests/deep_idle_test.sh
 set -u

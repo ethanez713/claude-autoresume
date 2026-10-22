@@ -1037,7 +1037,7 @@ rc_send() { # $1 = paneref
   pane="$(pr_pane "$p")"
   cmd="${CCAR_RC_COMMAND:-/remote-control}"
   if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
-    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    # shellcheck disable=SC2086 # clear keys are intentionally word-split key names
     txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
     sleep 0.3
   fi
@@ -1052,7 +1052,7 @@ rc_send() { # $1 = paneref
       sleep 0.5
     else
       if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
-        # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+        # shellcheck disable=SC2086 # clear keys are intentionally word-split key names
         txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
       fi
       log "rc: input box held unexpected text after typing the reconnect command — cleared it, not submitting"
@@ -1061,7 +1061,7 @@ rc_send() { # $1 = paneref
   fi
   left="$(rc_input_text "$(capture "$p")")"
   if [ -n "$left" ] && [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
-    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    # shellcheck disable=SC2086 # clear keys are intentionally word-split key names
     txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR   # never leave residue behind
   fi
   return 0
@@ -1196,7 +1196,7 @@ PY
 }
 
 backoff_target() { # $1 = now epoch; echoes target epoch using current $backoff_idx
-  # shellcheck disable=SC2206 — intentional word-split of the configured list
+  # shellcheck disable=SC2206 # intentional word-split of the configured list
   local -a steps=($CCAR_BACKOFF_MINUTES)
   local i=$backoff_idx
   [ "$i" -ge "${#steps[@]}" ] && i=$((${#steps[@]} - 1))
@@ -1281,7 +1281,7 @@ wait_until() { # $1 = target epoch, $2 = mode; returns 1 if cancelled
 send_resume() { # $1 = paneref
   local p="$1" pane text; pane="$(pr_pane "$p")"
   if [ -n "${CCAR_RESUME_PREKEYS:-}" ]; then
-    # shellcheck disable=SC2086 — prekeys are intentionally word-split key names
+    # shellcheck disable=SC2086 # prekeys are intentionally word-split key names
     txp "$p" send-keys -t "$pane" $CCAR_RESUME_PREKEYS
     sleep 1
   fi
@@ -1296,7 +1296,7 @@ send_resume() { # $1 = paneref
   # command. The clear keys are configurable because which binding empties the
   # input is TUI-specific (C-u kills the line in Claude Code's prompt).
   if [ -n "${CCAR_RESUME_CLEAR:-}" ]; then
-    # shellcheck disable=SC2086 — clear keys are intentionally word-split key names
+    # shellcheck disable=SC2086 # clear keys are intentionally word-split key names
     txp "$p" send-keys -t "$pane" $CCAR_RESUME_CLEAR
     sleep 0.3
   fi
@@ -1419,7 +1419,7 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
       txp "$p" send-keys -t "$pane" "${CCAR_LIMIT_PROMPT_CONFIRM:-Enter}"
       return 0
     fi
-    # shellcheck disable=SC2086 — nav step is an intentionally word-split key name
+    # shellcheck disable=SC2086 # nav step is an intentionally word-split key name
     txp "$p" send-keys -t "$pane" ${CCAR_LIMIT_PROMPT_NAV_STEP:-Up}
     sleep "${CCAR_LIMIT_PROMPT_NAV_PAUSE:-0.3}"   # let the menu redraw the new selection
   done
