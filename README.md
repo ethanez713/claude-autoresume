@@ -24,6 +24,21 @@ The patched status line writes `used_percentage` and `resets_at` to `state.json`
 
 Detection, the wait, native passthrough, and the remote-control watchdog are specified in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Screenshots
+
+<img src="docs/screenshots/monitor-log.png" width="85%" alt="Monitor log of one limit and one resume">
+
+**One limit, one resume**, from the monitor's own log. Panes latch from either signal: the
+account's usage in `state.json`, or the pause message on a pane's screen. At the reset the
+monitor leaves alone a pane whose screen changed since the pause, resumes the one still
+frozen, and checks that it took. The burn-window lines are the nudge sent to live sessions
+when unused quota is about to reset.
+
+<img src="docs/screenshots/tests.png" width="70%" alt="Tail of the full test run">
+
+**Tests.** 15 suites and 409 assertions, five of them end-to-end against a throwaway tmux
+server. This tail is the remote-control watchdog's run.
+
 ## Install
 
 `tmux` and `python3` need to be on `PATH`. The installer stays on the machine: it checks for both and tells you if either is missing.
