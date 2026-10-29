@@ -13,7 +13,10 @@
 # (screen changed since the pause / actively repainting). This guards BOTH ways:
 # no "continue" into a pane that wasn't limited or is mid-work (false positive),
 # and no paused pane skipped because UI chrome (todo list, spinner) pushed the
-# pause message around the screen (false negative). Usage readings from the
+# pause message around the screen (false negative). A pane with a fresh Mod
+# handoff file is the exception: the plugin resumes it, so it is not latched.
+# The choice prompt is still answered here — the plugin cannot see that dialog —
+# and a parked claim still drives the hourglass. Usage readings from the
 # status line are only trusted inside their validity window: a >=limit reading
 # until its own resets_at passes, a clear reading while fresh — a stale number
 # is treated as unknown, never as truth. 100% local: no network, bash + tmux +
@@ -39,13 +42,15 @@ declare -A prompt_last_dismiss=()   # paneref -> epoch we last answered its rate
 #                         consecutive scans identical — a latch can fire while a
 #                         pane is still painting, and a snapshot of a moving
 #                         screen would make the gate see phantom "activity")
-#   pane_parked[paneref] = 1 once the pane has positive pause evidence and so
-#                         will be resumed: a seen latch always, a usage latch
-#                         only when the pause message is in its scrollback. This,
-#                         not the bare latch, drives the wait glyph — an idle
+#   pane_parked[paneref] = 1 when the hourglass should show. A seen latch always,
+#                         a usage latch only when the pause message is in its
+#                         scrollback, or a fresh Mod claim whose state is parked.
+#                         This, not the bare latch, drives the wait glyph — an idle
 #                         pane swept into a usage latch by account-wide usage is
 #                         latched (for resume safety) but not parked, so it keeps
-#                         its own idle/working glyph instead of the hourglass.
+#                         its own idle/working glyph instead of the hourglass. A
+#                         Mod claim never latches: the plugin resumes that pane,
+#                         and the hourglass is only the glyph.
 # In-memory only: a restarted monitor re-derives latches from the pause screens,
 # which stay painted until something is sent to the pane.
 # (=() matters: bash 5.1 + set -u treats a declared-but-never-assigned array as
@@ -54,6 +59,7 @@ declare -A pane_latch=()
 declare -A pane_snap=()
 declare -A pane_snap_ok=()
 declare -A pane_parked=()
+declare -A pane_mod=()            # paneref -> 1 while a fresh Mod claim is held; gates the once-only ownership log
 declare -A attached=()            # socket -> yes|no, recomputed once per scan
 declare -A pane_busy=()           # paneref -> last @ccar_busy value we published for its window
 declare -A pane_kind=()           # paneref -> grok | "" (last @ccar_kind we published)
@@ -368,6 +374,62 @@ read_hook_sub() { # $1 = paneref
   local out
   load_hook_sub "$1" out
   printf '%s' "$out"
+}
+
+# Fresh when the Mod rewrote <pane>.mod within CCAR_MOD_FRESH_SECONDS. Mtime,
+# not the epoch in the file: that epoch is the plugin's clock, and the rewrite
+# itself is the heartbeat (every 60s; the window is three of those, so one
+# dropped rewrite does not bounce the pane back). A state other than
+# watch|parked is still a claim — the plugin has the pane — but it does not park.
+# Optional $2 is a varname set to watch, parked, or empty.
+mod_owned() { # $1 = paneref
+  # `claim`, not `state`: printf -v of the caller's varname would write this
+  # function's own local if the names matched, and the caller would see "".
+  local f now mtime claim=""
+  if [ -n "${2:-}" ]; then
+    printf -v "$2" '%s' ""
+  fi
+  cache_pane_key "$1"
+  f="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/${pane_key_cache[$1]}.mod"
+  [ -f "$f" ] || return 1
+  idle_epoch now
+  mtime=$(stat -c %Y "$f" 2>/dev/null) || return 1
+  [ $(( now - mtime )) -le "${CCAR_MOD_FRESH_SECONDS:-180}" ] || return 1
+  IFS=$'\t' read -r claim _ <"$f" 2>/dev/null || true
+  case "$claim" in
+    watch|parked) ;;
+    *) claim="" ;;
+  esac
+  if [ -n "${2:-}" ]; then
+    printf -v "$2" '%s' "$claim"
+  fi
+  return 0
+}
+
+# Mirror a fresh Mod claim onto the hourglass and drop any latch. Runs before
+# publish_busy so a watch↔parked flip is the glyph this scan, not the next one.
+# A claim that just went stale clears the parked bit the plugin set; the latch
+# pass puts it back when the pane is actually paused.
+sync_mod_claim() { # $1 = paneref; returns 0 when the claim is fresh
+  local p="$1" state=""
+  if mod_owned "$p" state; then
+    if [ -z "${pane_mod[$p]:-}" ]; then
+      log "Mod owns this pane — not latching or resuming it"
+      pane_mod[$p]=1
+    fi
+    unset 'pane_latch[$p]' 'pane_snap[$p]' 'pane_snap_ok[$p]'
+    if [ "$state" = parked ]; then
+      pane_parked[$p]=1
+    else
+      unset 'pane_parked[$p]'
+    fi
+    return 0
+  fi
+  if [ -n "${pane_mod[$p]:-}" ]; then
+    log "Mod claim expired — this pane is monitored here again"
+    unset 'pane_mod[$p]' 'pane_parked[$p]'
+  fi
+  return 1
 }
 
 # Pure decision for @ccar_busy, split out of publish_busy so it can be unit
@@ -1435,12 +1497,19 @@ dismiss_limit_prompt() { # $1 = paneref, $2 = its captured screen; returns 0 onl
 # visible). A fresh sub-limit usage reading vetoes BOTH the prompt answer and
 # the text latch — that is what stops a conversation that merely displays the
 # limit phrase (or quotes the choice menu) from triggering key injection while
-# the account is demonstrably not limited.
+# the account is demonstrably not limited. A fresh Mod claim skips the latch
+# entirely (the plugin resumes that pane) but still answers the choice dialog.
 scan_panes() {
   local p scr ustate was busy_file
   attached=()                # re-probe each scan: attaching must light the indicator back up
   refresh_state_cache        # main-shell context, so the mtime cache persists across polls
   ustate="$(usage_state)"
+  # Before publish_busy: the hourglass reads pane_parked, and a Mod flip has to
+  # be visible on the publish this scan does.
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    sync_mod_claim "$p" || true
+  done <<<"$poll_panes"
   while IFS= read -r p; do
     [ -z "$p" ] && continue
     publish_busy "$p"
@@ -1453,6 +1522,13 @@ scan_panes() {
     scr=""
     if [ "$ustate" != clear ] || [ -n "${pane_latch[$p]:-}" ]; then
       scr="$(capture "$p")"
+    fi
+    if [ -n "${pane_mod[$p]:-}" ]; then
+      # The plugin cannot see this dialog. Answer it; do not latch.
+      if [ "$ustate" != clear ]; then
+        dismiss_limit_prompt "$p" "$scr" || true
+      fi
+      continue
     fi
     if [ "$ustate" != clear ] && dismiss_limit_prompt "$p" "$scr"; then
       [ "${pane_latch[$p]:-}" ] || log "rate-limit choice prompt on a pane — selected 'Stop and wait'; latched it as limited"
@@ -1501,9 +1577,10 @@ scan_panes() {
       *$'\n'"$p"$'\n'*) ;;
       *)
         unset 'pane_busy[$p]' 'pane_busy_snap[$p]' 'pane_hook_veto[$p]' 'pane_hook_veto_logged[$p]' 'pane_kind[$p]' \
-          'pane_hook_seen[$p]' 'pane_sub_seen[$p]'
+          'pane_hook_seen[$p]' 'pane_sub_seen[$p]' 'pane_mod[$p]'
         busy_file="${CCAR_BUSY_DIR:-$CCAR_STATE_DIR/busy}/$(pane_key "$p")"
-        rm -f "$busy_file" "$busy_file.sub" "$(dirname "$busy_file")/.$(basename "$busy_file").sublock" 2>/dev/null
+        rm -f "$busy_file" "$busy_file.sub" "$busy_file.mod" \
+          "$(dirname "$busy_file")/.$(basename "$busy_file").sublock" 2>/dev/null
         ;;
     esac
   done
@@ -1522,8 +1599,11 @@ scan_panes() {
 #      is not injected just because the account was limited.
 # Anything else means the pane changed since it was paused (user typed, resumed
 # by hand, new output) — skip it rather than inject into work we can't see.
+# A fresh Mod claim also says no: the latch may have been taken the scan before
+# the claim appeared, and the plugin sends its own resume.
 should_resume() { # $1 = paneref
   local p="$1" scr h
+  mod_owned "$p" && return 1
   scr="$(capture "$p")"
   h="$(hash_of "$scr")"
   if screen_shows_limit "$scr"; then

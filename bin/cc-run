@@ -79,10 +79,14 @@ if [ -n "${TMUX:-}" ]; then
 
   reconnect=0
   for arg in "$@"; do case "$arg" in -c|--continue|-r|--resume) reconnect=1 ;; esac; done
+  mod_args=()
+  if mod_dir="$(mod_plugin_dir)"; then
+    mod_args=(--plugin-dir "$mod_dir")
+  fi
   if [ "$reconnect" -eq 1 ]; then
-    exec claude "$@"                            # --continue/--resume: native semantics
+    exec claude "${mod_args[@]}" "$@"                            # --continue/--resume: native semantics
   else
-    exec claude --session-id "$(uuidgen)" "$@"  # fresh conversation, like native
+    exec claude "${mod_args[@]}" --session-id "$(uuidgen)" "$@"  # fresh conversation, like native
   fi
 fi
 
@@ -107,11 +111,12 @@ done
 # every time, like native); reconnects let claude pick. We `exec` so the window
 # auto-closes when claude exits (no stale windows piling up). exec bypasses the
 # `claude` alias via execvp(), so there's no recursion and no `command` needed.
+mod_q="$(mod_plugin_quoted)"
 if [ "$reconnect" -eq 1 ]; then
-  cmd="exec claude"
+  cmd="exec claude${mod_q:+ $mod_q}"
 else
   session_id="$(uuidgen)"
-  cmd="exec claude --session-id $session_id"
+  cmd="exec claude${mod_q:+ $mod_q} --session-id $session_id"
 fi
 for arg in "$@"; do
   cmd+=" $(printf '%q' "$arg")"

@@ -177,6 +177,10 @@ CCAR_LIMIT_PCT=95
 # a veto for this many seconds after captured_at. Outside those windows usage is
 # treated as UNKNOWN and detection falls back to per-pane screen evidence.
 CCAR_USAGE_FRESH_SECONDS=600
+# A pane whose mod claim ($CCAR_BUSY_DIR/<pane key>.mod) is younger than this is
+# left to the mod for latch and resume (docs/DESIGN.md §4a). Three of its 60s
+# heartbeats, so one missed rewrite does not hand the pane back.
+CCAR_MOD_FRESH_SECONDS=180
 # The pause message is matched against the pane's FULL visible screen (UI chrome
 # like a todo checklist can push it well above the bottom lines — that once made
 # the monitor skip a genuinely paused pane). For panes latched on account usage

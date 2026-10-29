@@ -218,6 +218,23 @@ tui_multiselect() {
   for ((i = 0; i < n; i++)); do [ "${sel:$i:1}" = 1 ] && printf '%s\n' "${tui_items[$i]}"; done
 }
 
+# Directory of the Claude Code Mod, when this checkout contains the plugin.
+# Interactive launches pass it as --plugin-dir so the plugin can take over
+# limit handling. No plugin.json: callers launch claude unchanged.
+mod_plugin_dir() {
+  [ -f "$here/mod/.claude-plugin/plugin.json" ] || return 1
+  printf '%s' "$here/mod"
+}
+
+# Shell-quoted `--plugin-dir <dir>`, or empty when the plugin is absent.
+# Callers splice it with ${mod_q:+ $mod_q} so a checkout without the plugin
+# keeps the command it typed before this existed.
+mod_plugin_quoted() {
+  local dir
+  dir="$(mod_plugin_dir)" || return 0
+  printf -- '--plugin-dir %q' "$dir"
+}
+
 # tmux on the ccar fallback socket.
 cx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
 
@@ -228,7 +245,7 @@ cx() { tmux -L "$CCAR_TMUX_SOCKET" "$@"; }
 # cc-run's post-crash reopen. Does NOT attach — the caller does.
 rebuild_session() { # $1 = dir to focus; $2.. = dirs to open, in order
   local focus="$1"; shift
-  local dir name win first_win="" focus_win="" pane sock cmd
+  local dir name win first_win="" focus_win="" pane sock cmd mod_q
   umask 077
   mkdir -p "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
   chmod 700 "$CCAR_STATE_DIR" "$CCAR_PANES_DIR"
@@ -250,7 +267,8 @@ rebuild_session() { # $1 = dir to focus; $2.. = dirs to open, in order
     if [ "$(cx show-options -gv automatic-rename 2>/dev/null)" = "on" ]; then
       cx set-option -w -t "$win" automatic-rename on
     fi
-    if [ "$(transcript_count "$dir")" -gt 0 ]; then cmd="exec claude -c"; else cmd="exec claude"; fi
+    mod_q="$(mod_plugin_quoted)"
+    if [ "$(transcript_count "$dir")" -gt 0 ]; then cmd="exec claude${mod_q:+ $mod_q} -c"; else cmd="exec claude${mod_q:+ $mod_q}"; fi
     pane="$(cx display-message -p -t "$win" '#{pane_id}')"
     sock="$(cx display-message -p '#{socket_path}')"
     cx send-keys -t "$pane" -l "$cmd"
