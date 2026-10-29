@@ -72,8 +72,8 @@ eq "with one window per registered directory" \
    "$(tmux -L "$sock" list-windows -t e2e -F '#{window_name}' | tr '\n' ' ')" "alpha beta "
 eq "each window keeps its directory tag" \
    "$(tmux -L "$sock" list-windows -t e2e -F '#{@ccar_dir}' | tr '\n' ' ')" "$alpha $beta "
-eq "the directory with a transcript continues it" "$(cat "$alpha/.argv" 2>&1)" "-c"
-eq "the one without starts fresh"                 "$(cat "$beta/.argv" 2>&1)"  ""
+eq "the directory with a transcript continues it" "$(cat "$alpha/.argv" 2>&1)" "--plugin-dir $repo/mod -c"
+eq "the one without starts fresh"                 "$(cat "$beta/.argv" 2>&1)"  "--plugin-dir $repo/mod"
 eq "the cancel key is bound on the new server" \
    "$(tmux -L "$sock" list-keys 2>/dev/null | grep -c cc-cancel)" "1"
 

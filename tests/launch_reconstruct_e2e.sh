@@ -87,9 +87,9 @@ tmux -L "$drv" send-keys -t "$dw" Enter
 sleep 5
 
 eq "reopens one window per tab, launch dir last" "$(windows)" "$alpha $beta $gamma "
-eq "the tab with a conversation continues it"   "$(cat "$alpha/.argv" 2>/dev/null | tr -d '\n')" "-c"
-eq "the tab without one starts fresh"           "$(cat "$beta/.argv"  2>/dev/null | tr -d '\n')" ""
-eq "the launch directory starts fresh"          "$(cat "$gamma/.argv" 2>/dev/null | tr -d '\n')" ""
+eq "the tab with a conversation continues it"   "$(cat "$alpha/.argv" 2>/dev/null | tr -d '\n')" "--plugin-dir $repo/mod -c"
+eq "the tab without one starts fresh"           "$(cat "$beta/.argv"  2>/dev/null | tr -d '\n')" "--plugin-dir $repo/mod"
+eq "the launch directory starts fresh"          "$(cat "$gamma/.argv" 2>/dev/null | tr -d '\n')" "--plugin-dir $repo/mod"
 eq "and it lands focused on the launch directory" \
    "$(tmux -L "$sock" display-message -p -t recon '#{@ccar_dir}')" "$gamma"
 
