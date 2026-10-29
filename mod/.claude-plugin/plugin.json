@@ -1,0 +1,6 @@
+{
+  "name": "autoresume",
+  "version": "0.1.0",
+  "description": "Resumes this Claude session when its usage limit resets",
+  "types": "./types/index.d.ts"
+}
