@@ -84,6 +84,9 @@ Three design decisions carry the whole thing:
 
 - **`bin/monitor.sh`** (single account-wide watcher) — see §4/§5.
 
+- **`mod/`** — a Claude Code mod that every interactive `cc-run` launch loads
+  with `--plugin-dir`. It resumes the session it runs in; see §4a.
+
 - **Pane registry** (`$CCAR_PANES_DIR`, default `~/.claude/autoresume/panes/`,
   `0700`) — one `0600` file per Claude pane, tab-separated
   `<socket_path>\t<session>\t<pane_id>\t<dir>`, written atomically by `cc-run`.
@@ -178,6 +181,33 @@ Why this shape (all learned from live limits):
   (no evidence), so it is never injected; a latched pane that died is dropped.
   Latches live in memory only — a restarted monitor re-derives them from the
   pause screens, which stay painted until something is sent to the pane.
+
+## 4a. Mod-owned panes
+
+Inside the session, the limit needs no inference. The mod (`mod/hooks/register.ts`)
+latches on the turn's own `StopFailure` with `error: rate_limit`, reads the reset from
+the session's rate-limit figures, and resumes with `$.prompt.submit`: a real prompt,
+not keystrokes, so §4's frozen-screen gate and §5's clear-the-box step don't apply.
+Any main-loop turn that starts before the reset (a hand resume) drops the wait, and so
+does `/autoresume-cancel`.
+
+- **Wait.** The latest `resetsAt` among windows at `CCAR_LIMIT_PCT` or above, plus
+  `CCAR_RESET_MARGIN_SECONDS`, binds: a spent seven-day window outranks a five-hour
+  reset. With no such window, back off by `CCAR_BACKOFF_MINUTES` per consecutive
+  limit stop; an answered turn resets the count. "Now" is corrected by
+  `CCAR_HOST_TIME_CMD` as in §5, re-read when a 30 s tick arrives over 90 s late.
+- **Config.** The mod sources `config.sh` (or `config.example.sh`) through bash, so the
+  two halves share one set of tunables.
+- **Handoff contract.** The mod writes `$CCAR_BUSY_DIR/<pane key>.mod`, holding
+  `watch|parked<TAB><epoch>`, every 60 s. It stamps `.activity` when the state changes,
+  and removes the file at session end. While the file is younger than
+  `CCAR_MOD_FRESH_SECONDS`, the monitor neither latches nor resumes that pane. It still
+  answers the limit choice dialog, and takes the hourglass from `parked`. A stale or
+  missing file returns the pane to §4, so a session without the mod is still covered.
+
+The monitor keeps what a mod can't reach. Mods have no API for the choice dialog or the
+Remote Control footer. Grok panes run no Claude process. And the glyphs and the
+terminal title are a view across every pane on a server.
 
 ## 5. Wait logic (`compute_wait`) + sleep/wake safety
 

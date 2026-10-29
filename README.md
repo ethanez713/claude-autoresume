@@ -22,6 +22,8 @@ flowchart LR
 
 The patched status line writes `used_percentage` and `resets_at` to `state.json` on each render. Busy hooks record turns, subagents, and dialogs. The monitor latches a pane when that account signal says the limit has hit, or when the pause is on the pane's own screen, then waits until `resets_at`. At reset it sends the resume text only when the pane still looks paused: a frozen screen, unchanged since the pause.
 
+Each wrapped session also loads [`mod/`](mod), a Claude Code mod that resumes its own session. It hears the rate-limit stop and reads the reset time from inside Claude, then sends the resume text as a real prompt. While the mod holds a pane, the monitor keeps that pane's glyph and still answers the limit's choice dialog, but leaves the resume to the mod. Sessions without the mod get the monitor's screen-based path.
+
 Detection, the wait, native passthrough, and the remote-control watchdog are specified in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Screenshots
@@ -72,6 +74,8 @@ cc-attach               # reattach, or reopen tabs after the server is gone
 cc-attach -y            # reopen every saved tab without asking
 cc-cancel               # stop the monitor's pending resume
 ```
+
+Inside a wrapped session, `/autoresume-cancel` drops that session's pending resume.
 
 Inside tmux, your prefix then `X` is the same cancel (`CCAR_CANCEL_KEY`). Prefix then `d` detaches the fallback session; a later `claude` or `cc-attach` walks back in. Use those commands to attach. They set `TERM` the way the launcher does, so Claude's TUI renders. A hand-rolled `tmux -L ccar attach` uses the shell's `TERM` and garbles the screen.
 
@@ -162,6 +166,8 @@ The tests stay on the machine. Where a test has to launch Claude, it puts a stub
 tests/run.sh          # unit-style; no tmux server
 tests/run.sh --e2e    # also the tests that drive a throwaway tmux server
 ```
+
+The mod has its own suite, run by the engine: `claude plugin test mod`.
 
 `tests/run.sh` exits non-zero if any script it runs fails. The default set is what CI runs. GitHub-hosted Ubuntu images ship shellcheck and do not ship tmux, so anything that starts a tmux server is behind `--e2e`.
 
