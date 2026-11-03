@@ -77,7 +77,7 @@ wants_rejoin() { # $@ = the launcher's own arguments
 busy_label() { # $1 = @ccar_busy
   case "$1" in
     1)     printf 'working' ;;
-    sub)   printf 'idle, subagents still working' ;;
+    bg)    printf 'idle, background work still running' ;;
     ask)   printf 'waiting for your answer' ;;
     limit) printf 'parked at the rate limit' ;;
     *)     printf 'idle' ;;

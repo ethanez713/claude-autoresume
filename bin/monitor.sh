@@ -276,10 +276,9 @@ install_busy_format() {
     # So no window is ever glyph-less before the first frame tick, and the states
     # the frame loop never touches have their glyph from the start.
     tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph 0)" \; \
-      set-option -g @ccar_sub_spin "$(busy_glyph 0 "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
       set-option -g @ccar_grok_spin "$(busy_glyph 0 "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
       set-option -g @ccar_grok_idle "${CCAR_GROK_IDLE_GLYPH:-🚹}" \; \
-      set-option -g @ccar_grok_job "${CCAR_GROK_JOB_GLYPH:-✻}" \; \
+      set-option -g @ccar_bg_job "${CCAR_BG_JOB_GLYPH:-✻}" \; \
       set-option -g @ccar_wait "${CCAR_LIMIT_GLYPH:-⧗}" \; \
       set-option -g @ccar_ask "${CCAR_ASK_GLYPH:-❗}" 2>/dev/null
     # Recorded even when a splice above found no anchor: a format that can't be
@@ -447,11 +446,12 @@ sync_mod_claim() { # $1 = paneref; returns 0 when the claim is fresh
 #                                    without that evidence does NOT count, so an
 #                                    idle pane swept into an account-usage latch
 #                                    keeps its own glyph)
-#   $7 grok     = "0" | "1"        (pane_has_grok_job: the pane's grok MCP server
-#                                    has a job running)
+#   $7 bg       = "0" | "1"        (pane_has_background_job: a grok job or a
+#                                    background shell is still alive under the pane)
 # Echoes the pane's state: "ask" (a dialog is waiting on the user), "limit"
-# (parked until the window resets), "1" (the main agent is running a turn), "sub" (the main agent is idle, its subagents are
-# not), "grok" (the turn is over, a grok job it started is not) or "0" (idle).
+# (parked until the window resets), "1" (the main agent is running a turn), "bg"
+# (idle, while subagents, a grok job, or a background shell it started are still
+# running) or "0" (idle).
 #
 # The signals disagree in every direction, and each is authoritative somewhere:
 #
@@ -475,23 +475,23 @@ sync_mod_claim() { # $1 = paneref; returns 0 when the claim is fresh
 #   an Esc-interrupt or a kill -9 leaves behind. This is the same
 #   frozen-means-parked test should_resume() uses on the rate-limit path.
 #
-#   sub outranks the scrape, because the subagent panel paints a coloured
+#   bg is one state over two signals. The subagent count outranks the scrape,
+#   and the stale-clear applies to it: the subagent panel paints a coloured
 #   spinner of its own that the scrape cannot tell apart from a turn of the main
 #   agent's. Only the count separates "thinking" from "waiting on its agents",
-#   and only a hook-set turn of its own takes the window back.
+#   and only a hook-set turn of its own takes the window back. Process liveness
+#   — a grok MCP job, or a background shell — is immune to that clear. Claude
+#   Code backgrounds the work and ends the turn, which fires Stop while the
+#   process runs on, and nothing fires when it finishes, so a frozen spinnerless
+#   screen cannot disprove it. Every other working signal outranks it.
 #
-#   grok is process liveness, so neither the stale clear nor a frozen screen
-#   disproves it: Claude Code backgrounds a long grok call and ends the turn, which
-#   fires Stop while the job runs on, and nothing fires when the job finishes.
-#   Every other working signal outranks it.
-#
-#   scrape=1 outranks grok, and it is what carries a pane with no hooks at
-#   all: Claude Code fires none when a background-task notification (a finished
-#   subagent, a scheduled wake) resumes a session, so the hook can read 0 from
-#   the last Stop while a turn is genuinely running. Seeing the spinner is proof
-#   that something is.
+#   scrape=1 outranks process-liveness bg, and it is what carries a pane with no
+#   hooks at all: Claude Code fires none when a background-task notification (a
+#   finished subagent, a scheduled wake) resumes a session, so the hook can read
+#   0 from the last Stop while a turn is genuinely running. Seeing the spinner
+#   is proof that something is.
 decide_busy() {
-  local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" grok="${7:-0}" stale=0
+  local hook="$1" scrape="$2" frozen="$3" veto_age="$4" sub="${5:-0}" limited="${6:-0}" bg="${7:-0}" stale=0
   # A parked pane keeps the hourglass only while it still looks parked. A live
   # spinner means it was resumed and will not get a continue at reset (should_resume
   # sees it repainting and skips it), so live activity takes the window back. Only
@@ -506,9 +506,9 @@ decide_busy() {
     stale=1
   fi
   [ "$stale" = 0 ] && [ "$hook" = 1 ] && { printf '1'; return; }
-  [ "$stale" = 0 ] && [ "$sub" = 1 ] && { printf 'sub'; return; }
+  [ "$stale" = 0 ] && [ "$sub" = 1 ] && { printf 'bg'; return; }
   [ "$scrape" = 1 ] && { printf '1'; return; }
-  [ "$grok" = 1 ] && { printf 'grok'; return; }
+  [ "$bg" = 1 ] && { printf 'bg'; return; }
   printf '0'
 }
 
@@ -524,6 +524,7 @@ proc_children() { # $1 = pid, $2 = varname to set. Every thread's children: a jo
 }
 
 is_grok_mcp_server() { # $1 = pid
+  [ -n "${CCAR_GROK_MCP_CMDLINE:-}" ] || return 1
   local arg
   local -a argv=()
   mapfile -d '' -t argv <"${CCAR_PROC_ROOT:-/proc}/$1/cmdline" 2>/dev/null || return 1
@@ -533,19 +534,38 @@ is_grok_mcp_server() { # $1 = pid
   return 1
 }
 
-# True while the pane's claude has a grok MCP server with a live job. The server
-# spawns one child per job and nothing else for longer than an instant, so "has a
-# child" is "is working". $1 = the pane's process id; $2 is the recursion depth.
-pane_has_grok_job() {
-  [ -n "${CCAR_GROK_MCP_CMDLINE:-}" ] && [ -n "${1:-}" ] || return 1
+# Same snapshot path as a foreground Bash tool. That child is hook=1 for the
+# turn, which outranks bg, so it does not have to be excluded here.
+is_background_shell() { # $1 = pid
+  [ -n "${CCAR_BG_SHELL_CMDLINE:-}" ] || return 1
+  local arg
+  local -a argv=()
+  mapfile -d '' -t argv <"${CCAR_PROC_ROOT:-/proc}/$1/cmdline" 2>/dev/null || return 1
+  for arg in "${argv[@]}"; do
+    # The snapshot id continues after the configured prefix.
+    [[ "$arg" == *"$CCAR_BG_SHELL_CMDLINE"* ]] && return 0
+  done
+  return 1
+}
+
+# True while background work is still alive under the pane: a grok MCP server
+# with a job, or a shell Claude started. The server spawns one child per job and
+# nothing else for longer than an instant, so "has a child" is "is working". A
+# matched shell is the work; its children are the command it is running, so the
+# walk stops there. $1 = the pane's process id; $2 is the recursion depth.
+pane_has_background_job() {
+  [ -n "${1:-}" ] || return 1
+  [ -n "${CCAR_GROK_MCP_CMDLINE:-}" ] || [ -n "${CCAR_BG_SHELL_CMDLINE:-}" ] || return 1
   local kids grandkids kid
   proc_children "$1" kids
   for kid in $kids; do
     if is_grok_mcp_server "$kid"; then
       proc_children "$kid" grandkids
       [ -n "${grandkids// }" ] && return 0
+    elif is_background_shell "$kid"; then
+      return 0
     elif [ "${2:-0}" -lt 2 ]; then
-      pane_has_grok_job "$kid" $(( ${2:-0} + 1 )) && return 0
+      pane_has_background_job "$kid" $(( ${2:-0} + 1 )) && return 0
     fi
   done
   return 1
@@ -553,7 +573,7 @@ pane_has_grok_job() {
 
 publish_busy() { # $1 = paneref
   [ -n "${CCAR_BUSY_REGEX:-}" ] || return 0
-  local pr="$1" hook sub limited=0 grok=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title pane_pid
+  local pr="$1" hook sub limited=0 bg=0 scrape="" frozen="" att=0 busy now veto_age="" ansi shot cmd title pane_pid
   hook="$(read_hook_busy "$pr")"
   sub="$(read_hook_sub "$pr")"
   # What this publish folded in. The idle refresh republishes only when a hook
@@ -600,8 +620,8 @@ publish_busy() { # $1 = paneref
     # flag still up falls through both: its timer is unobserved, not disproven.
     unset 'pane_hook_veto[$pr]' 'pane_hook_veto_logged[$pr]'
   fi
-  [ "$cmd" != grok ] && pane_has_grok_job "$pane_pid" && grok=1
-  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age" "$sub" "$limited" "$grok")"
+  [ "$cmd" != grok ] && pane_has_background_job "$pane_pid" && bg=1
+  busy="$(decide_busy "$hook" "$scrape" "$frozen" "$veto_age" "$sub" "$limited" "$bg")"
   if [ "$busy" = 0 ] && { [ "$hook" = 1 ] || [ "$sub" = 1 ]; } && [ -n "$veto_age" ] && [ -z "${pane_hook_veto_logged[$pr]:-}" ]; then
     log "pane $pr: hook flag stranded (no Stop/SubagentStop?) — cleared @ccar_busy after ${veto_age}s frozen with no spinner"
     pane_hook_veto_logged[$pr]=1
@@ -644,16 +664,16 @@ stats_emit() { # $1 = force — close the window even when it is shorter than CC
   # Two closes in the same second have nothing to report and would divide by zero.
   [ "$wall" -gt 0 ] || return 0
   local t; t=$(cpu_ticks)
-  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 sub=0 grok=0 att=0 k
+  local dcpu=$(( t - stats_last_cpu )) pct10 busy=0 bg=0 att=0 k
   pct10=$(( dcpu * 10 / wall ))          # ticks are 10ms, so ticks/second IS percent-of-core
   for k in "${!pane_busy[@]}"; do
-    case "${pane_busy[$k]}" in 1) busy=$(( busy + 1 )) ;; sub) sub=$(( sub + 1 )) ;; grok) grok=$(( grok + 1 )) ;; esac
+    case "${pane_busy[$k]}" in 1) busy=$(( busy + 1 )) ;; bg) bg=$(( bg + 1 )) ;; esac
   done
   for k in "${!attached[@]}";  do [ "${attached[$k]}" = yes ] && att=$(( att + 1 )); done
-  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"sub":%d,"grok":%d,"servers_attached":%d,"latched":%d}\n' \
+  printf '{"ts":"%s","window_s":%d,"cpu_ms":%d,"cpu_pct":%d.%d,"polls":%d,"frames":%d,"registered":%d,"claude":%d,"busy":%d,"bg":%d,"servers_attached":%d,"latched":%d}\n' \
     "$(date -Is)" "$wall" "$(( dcpu * 10 ))" "$(( pct10 / 10 ))" "$(( pct10 % 10 ))" \
     "$stats_polls" "$stats_frames" "$(count "$poll_registry")" "$(count "$poll_panes")" \
-    "$busy" "$sub" "$grok" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
+    "$busy" "$bg" "$att" "${#pane_latch[@]}" >>"$CCAR_STATS_JSONL"
   stats_last_ts=$now; stats_last_cpu=$t; stats_polls=0; stats_frames=0
   local max="${CCAR_STATS_MAX_BYTES:-262144}"
   if [ "$(stat -c%s "$CCAR_STATS_JSONL" 2>/dev/null || echo 0)" -gt "$max" ]; then
@@ -673,11 +693,11 @@ busy_sockets() { # sockets with a pane in an ANIMATED state AND a client attache
   # A hook-only flag on an unattached server is correct and free to publish, but
   # nobody is looking at that window list — the socket_attached filter is what
   # keeps the animation loop (spinner set-option + refresh-client every
-  # CCAR_BUSY_ANIM_MS) from spending real cost on a walked-away session. The
-  # limit glyph is static, so a parked pane needs no frames.
+  # CCAR_BUSY_ANIM_MS) from spending real cost on a walked-away session. limit
+  # and bg are static glyphs, so those panes need no frames.
   local p s
   for p in "${!pane_busy[@]}"; do
-    case "${pane_busy[$p]}" in 1|sub) ;; *) continue ;; esac
+    case "${pane_busy[$p]}" in 1) ;; *) continue ;; esac
     s="$(pr_socket "$p")"
     socket_attached "$s" && printf '%s\n' "$s"
   done | sort -u
@@ -697,7 +717,7 @@ publish_any_busy() {
   [ -n "${CCAR_BUSY_TITLE_FORMAT:-}" ] || return 0
   local p s state
   local -A any=()
-  local -A rank=([0]=0 [limit]=1 [grok]=2 [sub]=3 [1]=4 [ask]=5)
+  local -A rank=([0]=0 [limit]=1 [bg]=2 [1]=3 [ask]=4)
   for p in "${!pane_busy[@]}"; do
     s="$(pr_socket "$p")"; state="${pane_busy[$p]}"
     [ -n "${any[$s]:-}" ] && [ "${rank[${any[$s]}]:-0}" -ge "${rank[$state]:-0}" ] && continue
@@ -718,7 +738,7 @@ publish_any_busy() {
 any_animated_mark() {
   local p
   for p in "${!pane_busy[@]}"; do
-    case "${pane_busy[$p]}" in 1|sub) return 0 ;; esac
+    case "${pane_busy[$p]}" in 1) return 0 ;; esac
   done
   return 1
 }
@@ -752,7 +772,7 @@ hook_needs_publish() { # $1 = paneref
   want=0
   [ "$hook" = ask ] && want=ask
   [ "$want" = 0 ] && [ "$hook" = 1 ] && want=1
-  [ "$want" = 0 ] && [ "$sub" = 1 ] && want=sub
+  [ "$want" = 0 ] && [ "$sub" = 1 ] && want=bg
   [ "$published" != "$want" ]
 }
 
@@ -842,7 +862,6 @@ poll_sleep() {
     while IFS= read -r socket; do
       [ -n "$socket" ] || continue
       tmux -S "$socket" set-option -g @ccar_spin "$(busy_glyph "$busy_frame")" \; \
-        set-option -g @ccar_sub_spin "$(busy_glyph "$busy_frame" "${CCAR_SUBAGENT_GLYPHS:-}")" \; \
         set-option -g @ccar_grok_spin "$(busy_glyph "$busy_frame" "${CCAR_GROK_BUSY_GLYPHS:-⠹ ⠼ ⠧ ⠏}")" \; \
         refresh-client -S 2>/dev/null
     done <<<"$socks"
@@ -1648,8 +1667,8 @@ activity_is_quiet() {
 }
 
 # Every watched pane published idle, nothing latched, no rc failure in
-# progress, and no recent hook. ask/limit/sub/1 all keep the normal poll:
-# a dialog, a parked limit, and a live turn still need it.
+# progress, and no recent hook. ask/limit/bg/1 all keep the normal poll:
+# a dialog, a parked limit, background work, and a live turn still need it.
 deep_idle_ready() {
   [ "${#pane_busy[@]}" -gt 0 ] || return 1
   local p

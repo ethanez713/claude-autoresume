@@ -185,7 +185,8 @@ printf '0\t1700000000\n' >"$idle_dir/$keyA"
 printf '2\t1700000000\n' >"$idle_dir/$keyA.sub"
 tmux_n=0
 poll_sleep
-check "subagent count publishes sub" "sub" "${pane_busy[$prA]}"
+check "subagent count publishes bg" "bg" "${pane_busy[$prA]}"
+any_animated_mark && bad "a bg-only pane is not animated" || ok "a bg-only pane is not animated"
 rm -f "$idle_dir/$keyA.sub"
 
 echo "animated poll_sleep still frames"

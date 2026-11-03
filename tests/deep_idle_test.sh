@@ -39,7 +39,7 @@ quiet_panes() { # one idle pane and a stamp old enough for the default 300s
 echo "deep idle predicate"
 quiet_panes
 deep_idle_ready && ok "idle panes and an old stamp are quiet" || bad "idle panes and an old stamp are quiet"
-for s in 1 sub ask limit; do
+for s in 1 bg ask limit; do
   pane_busy[$pr]=$s
   deep_idle_ready && bad "published $s stays on the poll" || ok "published $s stays on the poll"
 done

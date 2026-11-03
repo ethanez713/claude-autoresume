@@ -120,11 +120,10 @@ Claude's title glyph stays `✳` for a running turn and for an idle prompt. The 
 ```
 1:✽ project-a    Claude, running a turn
 2:✳ project-b    Claude, idle at the prompt
-3:◑ project-c    Claude idle; its subagents are still working
-4:⧗ project-d    parked at the limit, waiting for the window to reset
-5:✻ project-e    Claude idle; a grok job it started is still running
-6:⠏ project-f    Grok, running a turn
-7:🚹 project-g    Grok, idle
+3:⧗ project-c    parked at the limit, waiting for the window to reset
+4:✻ project-d    Claude idle; subagents, a grok job or a background shell it started are still running
+5:⠏ project-e    Grok, running a turn
+6:🚹 project-f    Grok, idle
 ```
 
 Put that leading `✳` on Claude and Grok window names in `~/.tmux.conf`. Naming windows is tmux's job:

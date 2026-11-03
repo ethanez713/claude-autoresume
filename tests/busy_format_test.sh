@@ -44,12 +44,10 @@ has "set-titles-string reads the per-SERVER flag"    '@ccar_any_busy' "$(opt set
 is  "the pre-patch title format is stashed" '#T' "$(opt @ccar_orig_set-titles-string)"
 is  "set-titles is turned on so the title reaches the terminal" 'on' "$(opt set-titles)"
 is  "a busy window has a glyph before the first frame tick" "$(busy_glyph 0)" "$(opt @ccar_spin)"
-is  "so does one whose subagents are working" \
-    "$(busy_glyph 0 "$CCAR_SUBAGENT_GLYPHS")" "$(opt @ccar_sub_spin)"
 is  "a grok window has its braille frame before the first tick" \
     "$(busy_glyph 0 "$CCAR_GROK_BUSY_GLYPHS")" "$(opt @ccar_grok_spin)"
 is  "idle grok is the mens-symbol emoji, published once" "$CCAR_GROK_IDLE_GLYPH" "$(opt @ccar_grok_idle)"
-is  "the grok-job glyph is static, so it is published once" "$CCAR_GROK_JOB_GLYPH" "$(opt @ccar_grok_job)"
+is  "the background-job glyph is static, so it is published once" "$CCAR_BG_JOB_GLYPH" "$(opt @ccar_bg_job)"
 is  "the limit glyph is static, so it is published once" "$CCAR_LIMIT_GLYPH" "$(opt @ccar_wait)"
 is  "so is the dialog-waiting glyph" "$CCAR_ASK_GLYPH" "$(opt @ccar_ask)"
 
@@ -73,18 +71,15 @@ has "a rebuilt server under a live monitor is re-patched" '@ccar_busy' "$(opt wi
 
 echo "window name"
 tm set-option -g @ccar_spin '✽'
-tm set-option -g @ccar_sub_spin '◑'
 tm set-option -g @ccar_wait '⧗'
 tm set-option -g @ccar_ask '❗'
 tm set-option -g @ccar_grok_spin '⠏'
 tm set-option -g @ccar_grok_idle "$CCAR_GROK_IDLE_GLYPH"
-tm set-option -g @ccar_grok_job '✻'
+tm set-option -g @ccar_bg_job '✻'
 tm set-option -w -t "$pane" @ccar_busy 1
 is "working: the leading ✳ becomes the current frame" '✽ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
-tm set-option -w -t "$pane" @ccar_busy sub
-is "subagents out: it becomes the subagent frame"     '◑ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
-tm set-option -w -t "$pane" @ccar_busy grok
-is "turn over, grok job running: it becomes the static job glyph" '✻ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
+tm set-option -w -t "$pane" @ccar_busy bg
+is "background work still running: the window shows ✻" '✻ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy limit
 is "parked at the limit: it becomes the hourglass"    '⧗ project-a' "$(render "$CCAR_BUSY_NAME_FORMAT" "$pane")"
 tm set-option -w -t "$pane" @ccar_busy ask
@@ -108,10 +103,8 @@ tm set-option -g @ccar_any_busy 1
 is "any session working: the title sparkles"     '✽ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy ask
 is "any session awaiting the user: the taskbar flags it" '❗ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
-tm set-option -g @ccar_any_busy sub
-is "only subagents left working: the title moons" '◑ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
-tm set-option -g @ccar_any_busy grok
-is "only a grok job left running: the title shows the job glyph" '✻ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
+tm set-option -g @ccar_any_busy bg
+is "only background work left: the title shows ✻" '✻ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy limit
 is "everything parked at the limit: the taskbar waits" '⧗ project-a' "$(render "$CCAR_BUSY_TITLE_FORMAT" "$pane")"
 tm set-option -g @ccar_any_busy 0
@@ -132,21 +125,17 @@ is "the last pane going idle clears it"       '0' "$(opt @ccar_any_busy)"
 # Precedence, which is NOT the per-window one: the taskbar answers "is anything
 # still moving", so a pane that is parked can never speak over one that isn't.
 socket_any_busy=()
-pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=sub)
+pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=bg)
 publish_any_busy
-is "working subagents outrank a parked pane"  'sub'   "$(opt @ccar_any_busy)"
+is "background work outranks a parked pane"   'bg'    "$(opt @ccar_any_busy)"
 socket_any_busy=()
-pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=grok)
+pane_busy=(["$sock"$'\t'"$pane"]=bg ["$sock"$'\t'%99]=1)
 publish_any_busy
-is "a grok job outranks a parked pane"        'grok'  "$(opt @ccar_any_busy)"
-socket_any_busy=()
-pane_busy=(["$sock"$'\t'"$pane"]=grok ["$sock"$'\t'%99]=sub)
-publish_any_busy
-is "working subagents outrank a grok job"     'sub'   "$(opt @ccar_any_busy)"
+is "a running turn outranks background work"  '1'     "$(opt @ccar_any_busy)"
 socket_any_busy=()
 pane_busy=(["$sock"$'\t'"$pane"]=limit ["$sock"$'\t'%99]=1)
 publish_any_busy
-is "a running turn outranks both"             '1'     "$(opt @ccar_any_busy)"
+is "a running turn outranks a parked pane"    '1'     "$(opt @ccar_any_busy)"
 socket_any_busy=()
 pane_busy=(["$sock"$'\t'"$pane"]=ask ["$sock"$'\t'%99]=1)
 publish_any_busy
