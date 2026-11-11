@@ -1,5 +1,7 @@
 # claude-autoresume
 
+[![CI](https://github.com/ethanez713/claude-autoresume/actions/workflows/ci.yml/badge.svg)](https://github.com/ethanez713/claude-autoresume/actions/workflows/ci.yml)
+
 A local `claude` wrapper that resumes rate-limited Claude Code sessions in place.
 
 ## The problem
